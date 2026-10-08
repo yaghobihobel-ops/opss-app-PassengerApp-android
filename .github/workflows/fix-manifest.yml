@@ -1,4 +1,4 @@
-name: Exclude Legacy Support Library Transitives
+name: Merge Duplicate Manifest Attributes
 
 on:
   workflow_dispatch:
@@ -13,102 +13,61 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 8
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '8'
-
-      - name: Find who drags in com.android.support
+      - name: Merge tools:replace declarations on <application>
         run: |
           set -euo pipefail
-          ./gradlew :app:dependencies --configuration prodDebugRuntimeClasspath \
-            --no-daemon > /tmp/deps.log 2>&1 || true
-          echo "--- direct legacy support declarations ---"
-          grep -n "com.android.support" app/build.gradle || echo "none left in build.gradle"
-          echo "--- legacy artifacts in the runtime graph ---"
-          grep -oE "com\.android\.support:[a-z0-9-]+:[0-9.]+" /tmp/deps.log | sort -u | head -20 || echo "none"
+          echo "--- before ---"
+          awk '/<application/,/\>/' app/src/main/AndroidManifest.xml | head -16
 
-      - name: Exclude every legacy support module
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import pathlib
-          p = pathlib.Path("app/build.gradle")
-          s = p.read_text(encoding="utf-8")
-
-          # Several third-party AARs still depend on the pre-AndroidX support
-          # library. Jetifier rewrites their bytecode but their manifest entries
-          # still collide with AndroidX's appComponentFactory, so drop the whole
-          # com.android.support group from every configuration.
-          old = ("    configurations {\n"
-                 "        all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'\n"
-                 "        all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'\n"
-                 "    }")
-          new = ("    configurations {\n"
-                 "        all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'\n"
-                 "        all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'\n"
-                 "        // Legacy support-library transitives collide with AndroidX.\n"
-                 "        all*.exclude group: 'com.android.support'\n"
-                 "    }")
-
-          if old in s:
-              s = s.replace(old, new, 1)
-              print("legacy support group excluded")
-          elif "all*.exclude group: 'com.android.support'" in s:
-              print("legacy support group already excluded")
-          else:
-              raise SystemExit("ERROR: could not locate the configurations block")
-
-          p.write_text(s, encoding="utf-8")
-          print("legacy support group excluded")
-          PY
-          sed -n '/^    configurations {/,/^    }/p' app/build.gradle
-
-      - name: Resolve the manifest collision explicitly
-        run: |
-          set -euo pipefail
           python3 - <<'PY'
           import pathlib, re
+          import xml.etree.ElementTree as ET
+
           p = pathlib.Path("app/src/main/AndroidManifest.xml")
           s = p.read_text(encoding="utf-8")
 
-          if "tools:replace=\"android:appComponentFactory\"" in s:
-              print("already present")
-              raise SystemExit(0)
+          start = s.find("<application")
+          if start == -1:
+              raise SystemExit("no <application> tag")
+          end = s.index(">", start)
+          tag = s[start:end + 1]
 
-          # Ensure the tools namespace is declared.
-          if "xmlns:tools=" not in s:
-              s = re.sub(r"(<manifest\b)",
-                         r'\1 xmlns:tools="http://schemas.android.com/tools"',
-                         s, count=1)
+          values, seen = [], set()
+          for v in re.findall(r'tools:replace="([^"]*)"', tag):
+              for part in v.split(","):
+                  part = part.strip()
+                  if part and part not in seen:
+                      seen.add(part)
+                      values.append(part)
 
-          # Add tools:replace to the <application> tag.
-          s, n = re.subn(r"(<application\b)",
-                         r'\1 tools:replace="android:appComponentFactory"',
-                         s, count=1)
-          print(f"application tag patched: {n}")
+          occurrences = len(re.findall(r'tools:replace="[^"]*"', tag))
+          print("declarations:", occurrences, "unique values:", values)
 
-          p.write_text(s, encoding="utf-8")
+          if occurrences != 1:
+              merged = "tools:replace=\"" + ",".join(values) + "\""
+              stripped = re.sub(r'\s*tools:replace="[^"]*"', "", tag)
+              at = stripped.index(">")
+              new_tag = stripped[:at].rstrip() + "\n        " + merged + ">"
+              s = s[:start] + new_tag + s[end + 1:]
+              p.write_text(s, encoding="utf-8")
+              print("merged into a single attribute")
+          else:
+              print("already a single declaration")
+
+          ET.fromstring(p.read_text(encoding="utf-8"))
+          print("AndroidManifest.xml parses cleanly")
           PY
-          head -3 app/src/main/AndroidManifest.xml
-          grep -o "<application[^>]*" app/src/main/AndroidManifest.xml | head -1
 
-      - name: Verify configuration still resolves
-        run: |
-          set -euo pipefail
-          chmod +x gradlew
-          ./gradlew help --no-daemon > /tmp/help.log 2>&1 || {
-            echo "configure failed:"; tail -30 /tmp/help.log; exit 1; }
-          echo "configuration OK"
+          echo "--- after ---"
+          grep -n "tools:replace" app/src/main/AndroidManifest.xml
 
       - name: Commit
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/build.gradle app/src/main/AndroidManifest.xml
-          git diff --cached --quiet || git commit -m "fix(gradle): exclude legacy com.android.support transitives"
+          git add app/src/main/AndroidManifest.xml
+          git diff --cached --quiet || git commit -m "fix(manifest): merge duplicate tools:replace declarations"
           for attempt in 1 2 3; do
             if git push origin HEAD:${{ github.event.repository.default_branch }} 2>/dev/null; then
               echo "pushed"; break
