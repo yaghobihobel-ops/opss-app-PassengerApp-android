@@ -7,6 +7,8 @@ android {
     configurations {
         all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'
         all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'
+        // Legacy support-library transitives collide with AndroidX.
+        all*.exclude group: 'com.android.support'
     }
 
     // The vendor keystore lives on a Windows machine that is not present
