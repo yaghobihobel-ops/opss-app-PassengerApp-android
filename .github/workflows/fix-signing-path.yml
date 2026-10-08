@@ -62,7 +62,9 @@ jobs:
           )
 
           s = s[:m.start()] + new_block + s[m.end():]
-          s = re.sub(r"signingConfig signingConfigs\.config",
+          # Older revisions referenced the old variable name; catch every variant.
+          s = re.sub(r"signingConfig\s+(?:signingConfigs\.config"
+                     r"|releaseKeystore\.exists\(\)\s*\?\s*signingConfigs\.config\s*:\s*null)",
                      "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null", s)
           p.write_text(s, encoding="utf-8")
           print("signing block rewritten")
