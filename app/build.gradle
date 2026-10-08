@@ -9,12 +9,15 @@ android {
         all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'
     }
 
+    def releaseKeystore = file('C:\Users\sitw2\Documents\okboz.jks')
     signingConfigs {
-        config {
-            keyAlias 'okboz.com'
-            keyPassword 'okboz.com'
-            storeFile file('C:\\Users\\sitw2\\Documents\\okboz.jks')
-            storePassword 'okboz.com'
+        if (releaseKeystore.exists() || file('C:/Users/sitw2/Documents/okboz.jks').exists()) {
+            config {
+                keyAlias 'okboz.com'
+                keyPassword 'okboz.com'
+                storeFile releaseKeystore
+                storePassword 'okboz.com'
+            }
         }
     }
     compileOptions {
@@ -38,7 +41,7 @@ android {
         }
         renderscriptTargetApi 28
         renderscriptSupportModeEnabled true
-        signingConfig signingConfigs.config
+        signingConfig releaseKeystore.exists() ? signingConfigs.config : null
     }
     flavorDimensions "default"
     dexOptions {
@@ -67,7 +70,7 @@ android {
             minifyEnabled true
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.config
+            signingConfig releaseKeystore.exists() ? signingConfigs.config : null
         }
         debug {
             debuggable true
@@ -76,7 +79,7 @@ android {
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.config
+            signingConfig releaseKeystore.exists() ? signingConfigs.config : null
         }
     }
     packagingOptions {
@@ -119,11 +122,7 @@ android {
 repositories {
     mavenCentral()
 
-    maven {
-        url "https://mint.splunk.com/gradle/"
-    }
 
-    maven { url "https://maven.fabric.io/public" }
 
     maven {
         url "https://jitpack.io"
@@ -185,7 +184,6 @@ dependencies {
     //implementation 'com.facebook.android:facebook-android-sdk:4.18.0'
     implementation 'com.facebook.android:facebook-login:5.13.0'
     implementation 'com.nineoldandroids:library:2.4.0'
-    implementation 'com.splunk.mint:mint:5.0.0'
     implementation 'com.stripe:stripe-android:8.0.0'
 
     //implementation 'com.stripe:stripe-android:2.1.0'
