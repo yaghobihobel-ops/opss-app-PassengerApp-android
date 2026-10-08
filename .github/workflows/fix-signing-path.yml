@@ -1,4 +1,4 @@
-name: Fix Keystore Path Escaping
+name: Fix Gradle JVM And Keystore Path
 
 on:
   workflow_dispatch:
@@ -13,43 +13,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show current signing block
-        run: |
-          set -euo pipefail
-          sed -n '8,26p' app/build.gradle
-
       - name: Escape the Windows keystore path for Groovy
         run: |
           set -euo pipefail
-          # Groovy single-quoted strings need the backslash escaped; the
-          # prepare step wrote a raw C:\ path, which breaks the build script.
           python3 - <<'PY'
           import pathlib, re
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
           before = s
-          # C:\Users\... -> C:\\Users\\...
+          # Groovy single-quoted strings need the backslash escaped.
           s = re.sub(r"file\('([A-Za-z]:\\[^']*)'\)",
                      lambda m: "file('" + m.group(1).replace("\\", "\\\\") + "')",
                      s)
-          if s != before:
-              p.write_text(s, encoding="utf-8")
-              print("escaped keystore path")
-          else:
-              print("path already escaped")
+          p.write_text(s, encoding="utf-8")
+          print("escaped keystore path" if s != before else "path already escaped")
           PY
-          echo "--- after ---"
-          sed -n '8,26p' app/build.gradle
           grep -n "releaseKeystore = file" app/build.gradle
+
+      - name: Drop JVM flags that no longer exist
+        run: |
+          set -euo pipefail
+          # -XX:MaxPermSize was removed in JDK 8+ and makes the JVM refuse to
+          # start on the JDK 17 that the runner ships with. Keep the heap setting.
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("gradle.properties")
+          s = p.read_text(encoding="utf-8")
+          out = re.sub(r"-XX:MaxPermSize=\d+[MmGg]?\s*", "", s)
+          p.write_text(out, encoding="utf-8")
+          print("patched gradle.properties")
+          PY
+          grep -E "^org.gradle.jvmargs" gradle.properties
 
       - name: Verify the build script parses
         run: |
           set -euo pipefail
-          # Gradle will evaluate the script; a clean configure proves the syntax.
           chmod +x gradlew
-          ./gradlew --version > /dev/null
-          ./gradlew help --no-daemon -q > /tmp/help.log 2>&1 || {
-            echo "configure failed, tail of log:"; tail -30 /tmp/help.log; exit 1;
+          ./gradlew help --no-daemon > /tmp/help.log 2>&1 || {
+            echo "configure failed, tail of log:"; tail -40 /tmp/help.log; exit 1;
           }
           echo "build script parses cleanly"
 
@@ -58,6 +59,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/build.gradle
-          git diff --cached --quiet || git commit -m "fix(gradle): escape the Windows keystore path for Groovy"
+          git add app/build.gradle gradle.properties
+          git diff --cached --quiet || git commit -m "fix(gradle): escape keystore path and drop removed JVM flags"
           git push origin HEAD:${{ github.event.repository.default_branch }}
