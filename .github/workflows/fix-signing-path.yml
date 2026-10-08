@@ -1,4 +1,4 @@
-name: Fix Gradle JVM And Keystore Path
+name: Fix Gradle Signing And JVM
 
 on:
   workflow_dispatch:
@@ -19,34 +19,68 @@ jobs:
           distribution: temurin
           java-version: '8'
 
-      - name: Escape the Windows keystore path for Groovy
+      - name: Make the signing config safe off the vendor machine
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import pathlib, re
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
-          before = s
-          # Groovy single-quoted strings need the backslash escaped.
-          s = re.sub(r"file\('([A-Za-z]:\\[^']*)'\)",
-                     lambda m: "file('" + m.group(1).replace("\\", "\\\\") + "')",
-                     s)
-          p.write_text(s, encoding="utf-8")
-          print("escaped keystore path" if s != before else "path already escaped")
+
+          # Replace the whole keystore probe with a Linux-safe one. Evaluating
+          # file() on a Windows path throws URISyntaxException on the runner, so
+          # the path is only consulted when the file is actually present.
+          block_pat = re.compile(
+              r"def releaseKeystore = file\('[^']*'\)\n"
+              r"(?:[ \t]*signingConfigs \{\n)?"
+              r"(?:[ \t]*if \(releaseKeystore\.exists\(\).*?\n[ \t]*\}\n)?"
+              r"(?:[ \t]*[ \t]*config \{.*?\n[ \t]*\}\n)?"
+              r"(?:[ \t]*\}\n)?",
+              re.S)
+
+          new_block = (
+              "    // The vendor keystore lives on a Windows machine that does not exist\n"
+              "    // here, so probe for it portably and fall back to the debug key.\n"
+              "    def releaseKeystoreFile = {\n"
+              "        def win = new File('C:/Users/sitw2/Documents/okboz.jks')\n"
+              "        def nix = new File('/opt/opss/okboz.jks')\n"
+              "        return win.exists() ? win : (nix.exists() ? nix : null)\n"
+              "    }()\n"
+              "    signingConfigs {\n"
+              "        if (releaseKeystoreFile != null) {\n"
+              "            config {\n"
+              "                keyAlias 'okboz.com'\n"
+              "                keyPassword 'okboz.com'\n"
+              "                storeFile releaseKeystoreFile\n"
+              "                storePassword 'okboz.com'\n"
+              "            }\n"
+              "        }\n"
+              "    }"
+          )
+
+          s2, n = block_pat.subn(new_block, s, count=1)
+          if n == 0:
+              print("ERROR: signing block pattern did not match")
+              raise SystemExit(1)
+          s2 = s2.replace("signingConfig releaseKeystore.exists() ? signingConfigs.config : null",
+                          "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null")
+          s2 = s2.replace("signingConfig signingConfigs.config",
+                          "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null")
+          p.write_text(s2, encoding="utf-8")
+          print("signing config rewritten")
           PY
-          grep -n "releaseKeystore = file" app/build.gradle
+          echo "--- resulting block ---"
+          sed -n '10,32p' app/build.gradle
+          grep -c "releaseKeystoreFile" app/build.gradle
 
       - name: Drop JVM flags that no longer exist
         run: |
           set -euo pipefail
-          # -XX:MaxPermSize was removed in JDK 8+ and makes the JVM refuse to
-          # start on the JDK 17 that the runner ships with. Keep the heap setting.
           python3 - <<'PY'
           import pathlib, re
           p = pathlib.Path("gradle.properties")
           s = p.read_text(encoding="utf-8")
-          out = re.sub(r"-XX:MaxPermSize=\d+[MmGg]?\s*", "", s)
-          p.write_text(out, encoding="utf-8")
+          p.write_text(re.sub(r"-XX:MaxPermSize=\d+[MmGg]?\s*", "", s), encoding="utf-8")
           print("patched gradle.properties")
           PY
           grep -E "^org.gradle.jvmargs" gradle.properties
@@ -66,5 +100,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle gradle.properties
-          git diff --cached --quiet || git commit -m "fix(gradle): escape keystore path and drop removed JVM flags"
+          git diff --cached --quiet || git commit -m "fix(gradle): make signing config portable and drop removed JVM flags"
           git push origin HEAD:${{ github.event.repository.default_branch }}
