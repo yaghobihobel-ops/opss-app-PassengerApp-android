@@ -1,0 +1,103 @@
+name: Fix Manifest Merge And Dependency Mix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Enable Jetifier and pin the support library conflict away
+        run: |
+          set -euo pipefail
+          echo "--- gradle.properties before ---"
+          cat -n gradle.properties
+
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("gradle.properties")
+          s = p.read_text(encoding="utf-8")
+
+          # Removing -XX:MaxPermSize earlier left the neighbouring comment glued
+          # to the next line, which silently commented out enableJetifier.
+          s = re.sub(r"^.*android\.enableJetifier.*$", "android.enableJetifier=true", s, flags=re.M)
+          s = re.sub(r"^.*android\.useAndroidX.*$", "android.useAndroidX=true", s, flags=re.M)
+
+          # Make sure the JVM args line is a clean, valid property.
+          s = re.sub(r"^org\.gradle\.jvmargs=.*$",
+                     "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8",
+                     s, flags=re.M)
+          p.write_text(s, encoding="utf-8")
+          print("properties normalised")
+          PY
+
+          echo "--- gradle.properties after ---"
+          cat -n gradle.properties
+          grep -qE "^android\.enableJetifier=true" gradle.properties || {
+            echo "ERROR: enableJetifier is not an active property"; exit 1; }
+
+      - name: Force AndroidX artifacts where a legacy one leaks in
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # The old dynamic-animation library is the last com.android.support
+          # dependency; its support-compat transitive is what breaks the merge.
+          # androidx.legacy already carries the same animation classes.
+          s = s.replace("implementation 'com.android.support:support-dynamic-animation:25.3.0'",
+                        "implementation 'androidx.dynamicanimation:dynamicanimation:1.0.0'")
+
+          # And pin the transitives that AGP 3.5 pulls in from the old support
+          # tree to their AndroidX equivalents.
+          if "configurations.all" in s:
+              s = s.replace(
+                  "configurations.all {\n    resolutionStrategy {\n        force 'androidx.core:core-ktx:1.6.0'",
+                  "configurations.all {\n    resolutionStrategy {\n        force 'androidx.core:core-ktx:1.6.0'\n"
+                  "        force 'androidx.appcompat:appcompat:1.0.0'\n"
+                  "        force 'androidx.core:core:1.0.0'\n"
+                  "        force 'androidx.fragment:fragment:1.0.0'\n"
+                  "        force 'androidx.versionedparcelable:versionedparcelable:1.0.0'",
+                  1)
+          p.write_text(s, encoding="utf-8")
+          print("dependencies pinned to AndroidX")
+          PY
+          grep -n "androidx.legacy\|force 'androidx" app/build.gradle | head -8
+
+      - name: Verify the build script parses
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew help --no-daemon > /tmp/help.log 2>&1 || {
+            echo "configure failed:"; tail -30 /tmp/help.log; exit 1;
+          }
+          echo "build script parses cleanly"
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradle.properties app/build.gradle
+          git diff --cached --quiet || git commit -m "fix(gradle): enable Jetifier and resolve AndroidX support-library conflict"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:${{ github.event.repository.default_branch }} 2>/dev/null; then
+              echo "pushed"; break
+            fi
+            git pull --rebase --autostash origin "${{ github.event.repository.default_branch }}"
+            [ "$attempt" = "3" ] && echo "::warning::push did not land"
+          done
