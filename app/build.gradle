@@ -52,6 +52,7 @@ android {
         }
         renderscriptTargetApi 28
         renderscriptSupportModeEnabled true
+    ndkVersion '22.0.7026061'
         signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
     }
     flavorDimensions "default"
