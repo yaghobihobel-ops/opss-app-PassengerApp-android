@@ -7,7 +7,7 @@
 | Package | `com.alaadcin.user` |
 | minSdk / targetSdk | 17 / 31 |
 | Gradle / AGP | 5.4.1 / 3.5.2 |
-| JDK | **8** |
+| JDK | **11** (Gradle 5.4.1 با JDK 17 و JDK 8 هر دو خطا می‌دهند) |
 | Flavor اصلی | `prod` |
 | خروجی فعلی | `debug` (تا زمان نهایی‌شدن پروژه) |
 
