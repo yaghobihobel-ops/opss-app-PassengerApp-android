@@ -67,7 +67,18 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle
           git diff --cached --quiet || git commit -m "chore(release): bump to ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})"
-          git push origin HEAD:${{ github.event.repository.default_branch }}
+          # Another workflow may have pushed since checkout. Retry with rebase;
+          # a lost race must not fail the build that follows.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:${{ github.event.repository.default_branch }} 2>/dev/null; then
+              echo "version bump pushed"
+              break
+            fi
+            git pull --rebase --autostash origin "${{ github.event.repository.default_branch }}"
+            if [ "$attempt" = "3" ]; then
+              echo "::warning::could not push the version bump; continuing with the local value"
+            fi
+          done
 
       - name: Build prod debug APK
         run: ./gradlew assembleProdDebug --no-daemon --stacktrace
