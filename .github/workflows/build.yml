@@ -26,9 +26,18 @@ jobs:
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Accept Android SDK licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+      - name: Accept Android SDK licenses and install the NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
+          if [ -n "${NDK:-}" ]; then
+            echo "Installing NDK $NDK"
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" > /dev/null 2>&1 || true
+          fi
+          echo "NDK versions present:"; ls "$ANDROID_HOME/ndk" || true
 
       - name: Work out the bumped version
         id: version
