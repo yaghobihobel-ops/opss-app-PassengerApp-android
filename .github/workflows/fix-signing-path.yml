@@ -1,0 +1,63 @@
+name: Fix Keystore Path Escaping
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show current signing block
+        run: |
+          set -euo pipefail
+          sed -n '8,26p' app/build.gradle
+
+      - name: Escape the Windows keystore path for Groovy
+        run: |
+          set -euo pipefail
+          # Groovy single-quoted strings need the backslash escaped; the
+          # prepare step wrote a raw C:\ path, which breaks the build script.
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+          before = s
+          # C:\Users\... -> C:\\Users\\...
+          s = re.sub(r"file\('([A-Za-z]:\\[^']*)'\)",
+                     lambda m: "file('" + m.group(1).replace("\\", "\\\\") + "')",
+                     s)
+          if s != before:
+              p.write_text(s, encoding="utf-8")
+              print("escaped keystore path")
+          else:
+              print("path already escaped")
+          PY
+          echo "--- after ---"
+          sed -n '8,26p' app/build.gradle
+          grep -n "releaseKeystore = file" app/build.gradle
+
+      - name: Verify the build script parses
+        run: |
+          set -euo pipefail
+          # Gradle will evaluate the script; a clean configure proves the syntax.
+          chmod +x gradlew
+          ./gradlew --version > /dev/null
+          ./gradlew help --no-daemon -q > /tmp/help.log 2>&1 || {
+            echo "configure failed, tail of log:"; tail -30 /tmp/help.log; exit 1;
+          }
+          echo "build script parses cleanly"
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle
+          git diff --cached --quiet || git commit -m "fix(gradle): escape the Windows keystore path for Groovy"
+          git push origin HEAD:${{ github.event.repository.default_branch }}
