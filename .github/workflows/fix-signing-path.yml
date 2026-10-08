@@ -102,4 +102,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle gradle.properties
           git diff --cached --quiet || git commit -m "fix(gradle): make signing config portable and drop removed JVM flags"
+          # Other workflows may have pushed since checkout; rebase before pushing.
+          git pull --rebase --autostash origin "${{ github.event.repository.default_branch }}" || true
           git push origin HEAD:${{ github.event.repository.default_branch }}
