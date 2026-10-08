@@ -31,13 +31,28 @@ jobs:
 
       - name: Accept Android SDK licenses and install the NDK
         run: |
+          set -euo pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
           NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
+          echo "Build asks for NDK: ${NDK:-<not pinned>}"
+
           if [ -n "${NDK:-}" ]; then
-            echo "Installing NDK $NDK"
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" > /dev/null 2>&1 || true
+            echo "Installing ndk;$NDK"
+            for attempt in 1 2 3; do
+              if yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" 2>&1 | tail -3; then
+                break
+              fi
+              echo "install attempt $attempt failed, retrying"
+              sleep 10
+            done
           fi
-          echo "NDK versions present:"; ls "$ANDROID_HOME/ndk" || true
+
+          echo "NDK revisions present:"
+          ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
+          if [ -n "${NDK:-}" ] && [ ! -d "$ANDROID_HOME/ndk/$NDK" ]; then
+            echo "::warning::NDK $NDK is not on the runner; the image ships newer revisions"
+          fi
 
       - name: Work out the bumped version
         id: version
