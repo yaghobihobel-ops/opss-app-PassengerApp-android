@@ -128,7 +128,7 @@ android {
         checkReleaseBuilds false
         abortOnError false
     }
-    ndkVersion '22.0.7026061'
+    ndkVersion '25.1.8937393'
 }
 repositories {
     mavenCentral()
