@@ -1,0 +1,130 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build debug APK and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Set up Gradle caching
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Work out the bumped version
+        id: version
+        run: |
+          set -euo pipefail
+          GRADLE=app/build.gradle
+
+          # The vendor shipped versionName as "5  .0" — stray spaces break any
+          # numeric comparison, so normalise before bumping.
+          sed -i -E 's/versionName[[:space:]]+"[^"]*"/versionName "0.0.0"/' "$GRADLE"
+
+          CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1)
+          CURRENT_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' "$GRADLE" | head -1)
+
+          # Standard semver patch bump: 0.0.1 -> 0.0.2 -> 0.0.3
+          MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
+          MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
+          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3)
+          PAT=${PAT:-0}
+          NEXT="$MAJ.$MIN.$((PAT + 1))"
+          NEXT_CODE=$((CURRENT_CODE + 1))
+
+          echo "current   versionName=$CURRENT_NAME versionCode=$CURRENT_CODE"
+          echo "next      versionName=$NEXT     versionCode=$NEXT_CODE"
+
+          sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NEXT\2/" "$GRADLE"
+          sed -i -E "s/(versionCode\s+)[0-9]+/\1$NEXT_CODE/" "$GRADLE"
+
+          echo "name=$NEXT"   >> "$GITHUB_OUTPUT"
+          echo "code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the version bump
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle
+          git diff --cached --quiet || git commit -m "chore(release): bump to ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})"
+          git push origin HEAD:${{ github.event.repository.default_branch }}
+
+      - name: Build prod debug APK
+        run: ./gradlew assembleProdDebug --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK" || { echo "No APK produced"; exit 1; }
+          cp "$APK" "dist/opss-passenger-${{ steps.version.outputs.name }}.apk"
+          ls -la dist
+
+      - name: Write changelog notes
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..HEAD"
+          else
+            RANGE="HEAD~20..HEAD"
+          fi
+
+          SUBJ=$(git log "$RANGE" --pretty='- %s (%h)' | head -30)
+          FILES=$(git diff --name-only "$RANGE" | grep -vE '^(app/build/|dist/)' | head -40 || true)
+          CNT=$(echo "$FILES" | grep -c . || echo 0)
+
+          {
+            echo "**Version ${{ steps.version.outputs.name }}** (versionCode ${{ steps.version.outputs.code }})"
+            echo ""
+            echo "### What changed and why"
+            echo ""
+            if [ -n "$SUBJ" ]; then echo "$SUBJ"; else echo "- (no commits in range)"; fi
+            echo ""
+            echo "### Files touched (${CNT})"
+            echo ""
+            if [ -n "$FILES" ]; then echo '```'; echo "$FILES"; echo '```'; else echo "- build output only"; fi
+            echo ""
+            echo "---"
+            echo "Built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` on $(date -u '+%Y-%m-%d %H:%M UTC')."
+          } > notes.md
+
+          cat notes.md
+          echo "FILE=notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.apk --clobber
+            gh release edit "$TAG" --title "Passenger $TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/*.apk --title "Passenger $TAG" --notes-file notes.md
+          fi
+          echo "Release $TAG is live: https://github.com/${{ github.repository }}/releases/tag/$TAG"
