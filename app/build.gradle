@@ -39,7 +39,7 @@ android {
         applicationId "com.alaadcin.user"
         minSdkVersion 17
         targetSdkVersion 31
-        versionCode 13
+        versionCode 14
         versionName "0.0.1"
         multiDexEnabled true
         vectorDrawables.useSupportLibrary = true
