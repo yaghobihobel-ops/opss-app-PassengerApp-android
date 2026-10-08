@@ -71,7 +71,8 @@
         android:resizeableActivity="false"
         android:supportsRtl="true"
         android:theme="@style/AppCompatTheme"
-        tools:replace="android:appComponentFactory,android:allowBackup">
+        tools:replace="android:appComponentFactory,android:allowBackup"
+        android:appComponentFactory="androidx.core.app.CoreComponentFactory">
         <activity android:name="com.alaadcin.user.SearchCategoryActivity"></activity>
         <activity
             android:name="com.alaadcin.user.RideDeliveryActivity"
