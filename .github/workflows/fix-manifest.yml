@@ -28,9 +28,10 @@ jobs:
           tag = s[start:end + 1]
 
           # The merger rejects tools:replace="...appComponentFactory" unless the
-          # attribute itself carries a value in this manifest.
-          has_attr = "android:appComponentFactory" in tag
-          declares_replace = "appComponentFactory" in tag and "tools:replace" in tag
+          # attribute itself carries a value in this manifest. Check for a real
+          # android:appComponentFactory="..." assignment, not a mention inside
+          # the tools:replace list.
+          has_attr = re.search(r'android:appComponentFactory\s*=\s*"', tag) is not None
 
           if has_attr:
               print("appComponentFactory already declared on <application>")
