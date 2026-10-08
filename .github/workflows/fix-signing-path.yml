@@ -19,7 +19,7 @@ jobs:
           distribution: temurin
           java-version: '8'
 
-      - name: Make the signing config safe off the vendor machine
+      - name: Make the signing config portable
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -27,24 +27,27 @@ jobs:
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
 
-          # Replace the whole keystore probe with a Linux-safe one. Evaluating
-          # file() on a Windows path throws URISyntaxException on the runner, so
-          # the path is only consulted when the file is actually present.
-          block_pat = re.compile(
-              r"def releaseKeystore = file\('[^']*'\)\n"
-              r"(?:[ \t]*signingConfigs \{\n)?"
-              r"(?:[ \t]*if \(releaseKeystore\.exists\(\).*?\n[ \t]*\}\n)?"
-              r"(?:[ \t]*[ \t]*config \{.*?\n[ \t]*\}\n)?"
-              r"(?:[ \t]*\}\n)?",
+          # Swallow the vendor block from the keystore probe up to compileOptions.
+          pat = re.compile(
+              r"[ \t]*def releaseKeystore = file\('[^']*'\)\n"
+              r".*?"
+              r"(?=[ \t]*compileOptions \{)",
               re.S)
 
+          m = pat.search(s)
+          if not m:
+              raise SystemExit("ERROR: signing block not found")
+
           new_block = (
-              "    // The vendor keystore lives on a Windows machine that does not exist\n"
-              "    // here, so probe for it portably and fall back to the debug key.\n"
+              "    // The vendor keystore lives on a Windows machine that is not present\n"
+              "    // here, and file() on a Windows path throws URISyntaxException on the\n"
+              "    // Linux runner. Probe portably and fall back to the Android debug key.\n"
               "    def releaseKeystoreFile = {\n"
               "        def win = new File('C:/Users/sitw2/Documents/okboz.jks')\n"
               "        def nix = new File('/opt/opss/okboz.jks')\n"
-              "        return win.exists() ? win : (nix.exists() ? nix : null)\n"
+              "        if (win.exists()) return win\n"
+              "        if (nix.exists()) return nix\n"
+              "        return null\n"
               "    }()\n"
               "    signingConfigs {\n"
               "        if (releaseKeystoreFile != null) {\n"
@@ -55,23 +58,19 @@ jobs:
               "                storePassword 'okboz.com'\n"
               "            }\n"
               "        }\n"
-              "    }"
+              "    }\n"
           )
 
-          s2, n = block_pat.subn(new_block, s, count=1)
-          if n == 0:
-              print("ERROR: signing block pattern did not match")
-              raise SystemExit(1)
-          s2 = s2.replace("signingConfig releaseKeystore.exists() ? signingConfigs.config : null",
-                          "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null")
-          s2 = s2.replace("signingConfig signingConfigs.config",
-                          "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null")
-          p.write_text(s2, encoding="utf-8")
-          print("signing config rewritten")
+          s = s[:m.start()] + new_block + s[m.end():]
+          s = re.sub(r"signingConfig signingConfigs\.config",
+                     "signingConfig releaseKeystoreFile != null ? signingConfigs.config : null", s)
+          p.write_text(s, encoding="utf-8")
+          print("signing block rewritten")
           PY
           echo "--- resulting block ---"
           sed -n '10,32p' app/build.gradle
-          grep -c "releaseKeystoreFile" app/build.gradle
+          echo "--- signingConfig references ---"
+          grep -n "signingConfig " app/build.gradle
 
       - name: Drop JVM flags that no longer exist
         run: |
