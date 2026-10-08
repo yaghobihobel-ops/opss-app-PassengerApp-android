@@ -1,4 +1,4 @@
-name: Drop Unavailable NDK Pin
+name: Install NDK 22 For CI
 
 on:
   workflow_dispatch:
@@ -13,38 +13,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Remove the NDK pin entirely
+      - name: Restore the NDK 22 pin
         run: |
           set -euo pipefail
-          echo "--- native sources present? ---"
-          find app/src -name "*.cpp" -o -name "*.c" -o -name "CMakeLists.txt" | head -5 || true
-          find app/src -name "*.cpp" | grep -q . && HAS_NATIVE=1 || HAS_NATIVE=0
-          echo "HAS_NATIVE=$HAS_NATIVE"
-          echo "--- jniLibs ---"
-          ls app/src/main/jniLibs 2>/dev/null || echo "(none)"
-
           python3 - <<'PY'
           import pathlib, re
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
 
-          # The app ships prebuilt .so files only and compiles no native code,
-          # yet it pins a 2020 NDK that no runner image carries. Drop the pin
-          # and let AGP use whatever NDK the image provides.
-          before = s
-          s = re.sub(r"^[ \t]*ndkVersion\s+'[^']+'\n", "", s, flags=re.M)
-          if s != before:
+          # The prebuilt .so files in jniLibs are old binaries; stripping their
+          # debug symbols needs the matching NDK toolchain layout. NDK 22 is the
+          # last release that still ships the legacy arm-linux-androideabi path,
+          # so pin it back and let CI install exactly that revision.
+          if "ndkVersion" not in s:
+              s = s.replace("    renderscriptSupportModeEnabled true",
+                            "    renderscriptSupportModeEnabled true\n    ndkVersion '22.0.7026061'")
               p.write_text(s, encoding="utf-8")
-              print("removed the ndkVersion pin")
+              print("restored ndkVersion '22.0.7026061'")
           else:
-              print("no ndkVersion pin found")
+              print("ndkVersion already declared")
           PY
-
-          grep -n "ndkVersion" app/build.gradle || echo "(ndkVersion no longer declared)"
-
-      - name: Show what the runner actually offers
-        run: |
-          ls "$ANDROID_HOME/ndk" || echo "(no NDKs in the image)"
+          grep -n "ndkVersion" app/build.gradle
 
       - name: Commit
         run: |
@@ -52,7 +41,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle
-          git diff --cached --quiet || git commit -m "fix(gradle): drop the unavailable NDK pin"
+          git diff --cached --quiet || git commit -m "fix(gradle): pin NDK 22, the last release with the legacy ABI toolchain"
           for attempt in 1 2 3; do
             if git push origin HEAD:${{ github.event.repository.default_branch }} 2>/dev/null; then
               echo "pushed"; break
