@@ -9,13 +9,22 @@ android {
         all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'
     }
 
-    def releaseKeystore = file('C:\Users\sitw2\Documents\okboz.jks')
+    // The vendor keystore lives on a Windows machine that is not present
+    // here, and file() on a Windows path throws URISyntaxException on the
+    // Linux runner. Probe portably and fall back to the Android debug key.
+    def releaseKeystoreFile = {
+        def win = new File('C:/Users/sitw2/Documents/okboz.jks')
+        def nix = new File('/opt/opss/okboz.jks')
+        if (win.exists()) return win
+        if (nix.exists()) return nix
+        return null
+    }()
     signingConfigs {
-        if (releaseKeystore.exists() || file('C:/Users/sitw2/Documents/okboz.jks').exists()) {
+        if (releaseKeystoreFile != null) {
             config {
                 keyAlias 'okboz.com'
                 keyPassword 'okboz.com'
-                storeFile releaseKeystore
+                storeFile releaseKeystoreFile
                 storePassword 'okboz.com'
             }
         }
@@ -41,7 +50,7 @@ android {
         }
         renderscriptTargetApi 28
         renderscriptSupportModeEnabled true
-        signingConfig releaseKeystore.exists() ? signingConfigs.config : null
+        signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
     }
     flavorDimensions "default"
     dexOptions {
@@ -70,7 +79,7 @@ android {
             minifyEnabled true
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig releaseKeystore.exists() ? signingConfigs.config : null
+            signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
         }
         debug {
             debuggable true
@@ -79,7 +88,7 @@ android {
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig releaseKeystore.exists() ? signingConfigs.config : null
+            signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
         }
     }
     packagingOptions {
