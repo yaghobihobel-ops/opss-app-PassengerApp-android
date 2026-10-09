@@ -112,31 +112,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import pathlib, re
+          import pathlib
 
           BASE = "https://taxi.ecardo.ir/"
 
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
 
-          # A single source of truth for the backend, overridable per build.
           if "SERVER_BASE_URL" not in s:
               block = (
-                  "        // Single source of truth for the backend address. Override with\n"
-                  "        // -PSERVER_BASE_URL=... on the command line when needed.\n"
-                  f"        buildConfigField \"String\", \"SERVER_BASE_URL\", \"\\\"${{SERVER_BASE_URL ?: '{BASE}'}}\\\"\"\n"
-                  "        buildConfigField \"String\", \"API_BASE_URL\", \"\\\"${SERVER_BASE_URL ?: '" + BASE + "'}webservice_shark.php\\\"\"\n"
+                  "        // Single source of truth for the backend address. Override per build\n"
+                  "        // with -PSERVER_BASE_URL=https://host/ on the command line.\n"
+                  '        buildConfigField "String", "SERVER_BASE_URL", "\\"" + (SERVER_BASE_URL ?: "' + BASE + '") + "\\""\n'
+                  '        buildConfigField "String", "API_BASE_URL", "\\"" + (SERVER_BASE_URL ?: "' + BASE + '") + "webservice_shark.php\\""\n'
               )
               anchor = "        multiDexEnabled true"
-              if anchor in s:
-                  s = s.replace(anchor, block + anchor, 1)
-              else:
+              if anchor not in s:
                   raise SystemExit("ERROR: no insertion point in app/build.gradle")
+              s = s.replace(anchor, block + anchor, 1)
 
               # Gradle side: allow -PSERVER_BASE_URL from the command line.
               s = s.replace(
                   "android {",
-                  "// Overridable from the command line: ./gradlew assembleProdRelease -PSERVER_BASE_URL=https://...\n"
+                  "// Override from the CLI: ./gradlew assembleProdDebug -PSERVER_BASE_URL=https://host/\n"
                   "ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')\n\n"
                   "android {",
                   1)
