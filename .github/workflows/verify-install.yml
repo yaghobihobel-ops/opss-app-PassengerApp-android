@@ -123,23 +123,26 @@ jobs:
             tail -20 /tmp/xvfb.log 2>/dev/null || true
           fi
 
-      - name: Write the release-picker helper
+      - name: Resolve which release to test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -uo pipefail
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" -o releases.json
           cat > resolve_apk.py <<'PYEOF'
           import json
           import sys
 
           # Choose the highest released version that actually carries an APK.
           #
-          # `/releases/latest` returns the most recently published release, not
-          # the highest version, so a rebuild landing on an older tag stays
-          # invisible to every workflow that downloads from it. Compare the
-          # numeric triple rather than the tag string, because v0.0.9 sorts
-          # after v0.0.10 alphabetically.
+          # `/releases/latest` returns the most recently published release, not the
+          # highest version, so a rebuild landing on an older tag stays invisible to every
+          # workflow that downloads from it. Compare the numeric triple rather than the
+          # tag string, because v0.0.9 sorts after v0.0.10 alphabetically.
           #
-          # Exits non-zero on an API error or when nothing is published, so an
-          # empty URL is never mistaken for "no releases". Parsed with python
-          # because jq is not installed on every runner image.
+          # Exits non-zero on an API error or when nothing is published, so an empty URL
+          # is never mistaken for "no releases". Parsed with python because jq is not
+          # installed on every runner image.
           with open("releases.json", encoding="utf-8") as fh:
               rels = json.load(fh)
 
@@ -168,13 +171,6 @@ jobs:
 
           print(best[1])
           PYEOF
-
-      - name: Resolve which release to test
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" -o releases.json
           python3 resolve_apk.py > "$GITHUB_WORKSPACE/apk-url.txt"
           echo "testing: $(cat "$GITHUB_WORKSPACE/apk-url.txt" 2>/dev/null || echo none)"
           test -s "$GITHUB_WORKSPACE/apk-url.txt" || { echo "::error::could not resolve a release URL"; exit 1; }
