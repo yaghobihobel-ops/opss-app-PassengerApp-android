@@ -250,6 +250,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      # Needed so the release job can download the APK artifact this run produced.
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -293,6 +295,24 @@ jobs:
           git commit -m "chore(release): bump to ${{ steps.bump.outputs.name }} (versionCode ${{ steps.bump.outputs.code }}) [skip ci]"
           git push origin HEAD:main
 
+      - name: Download the APK from this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for attempt in 1 2 3; do
+            if gh run download "${{ github.run_id }}" -D dist \
+                 --pattern "opss-${{ vars.APP_SLUG || 'passenger' }}-*" 2>/dev/null; then
+              break
+            fi
+            echo "download attempt $attempt failed, retrying"
+            sleep 15
+          done
+          APK=$(find dist -name '*.apk' | head -1)
+          test -n "$APK" || { echo "ERROR: APK not found in the run artifacts"; exit 1; }
+          echo "APK: $APK"
+
       - name: Publish the APK to the matching release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -300,9 +320,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v$VERSION"
-          gh run download "${{ github.run_id }}" -D /tmp/art --pattern "opss-${{ vars.APP_SLUG || 'passenger' }}-*" || true
-          APK=$(find /tmp/art -name '*.apk' | head -1)
-          test -n "$APK" || { echo "ERROR: APK not found in run artifacts"; exit 1; }
+          APK=$(find dist -name '*.apk' | head -1)
+          test -n "$APK" || { echo "ERROR: no APK to publish"; exit 1; }
 
           NAME="opss-${{ vars.APP_SLUG || 'passenger' }}-$VERSION.apk"
 
@@ -315,7 +334,7 @@ jobs:
             echo "> **Install note:** this is a *debug* build, signed with the standard"
             echo "> Android debug key. If it will not install on your phone, uninstall the"
             echo "> previously installed copy first — Android refuses to replace an app"
-            echo "> signed with a different key. Debug builds also report to a placeholder"
+            echo "> signed with a different key. Debug builds also point at a placeholder"
             echo "> Firebase project, so login and push will not work yet."
             echo ""
             echo "### What changed and why"
