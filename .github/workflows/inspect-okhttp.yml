@@ -39,6 +39,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p /tmp/probe && cd /tmp/probe
+          exec > /tmp/probe/report.txt 2>&1
           for AAR in "$GITHUB_WORKSPACE"/app/libs/*.aar; do
             NAME=$(basename "$AAR" .aar)
             echo "==================== $NAME ===================="
@@ -70,6 +71,29 @@ jobs:
       - name: Show the resolved dependency graph for okhttp
         run: |
           set -uo pipefail
+          exec > /tmp/probe/graph.txt 2>&1
           chmod +x gradlew 2>/dev/null || true
           ./gradlew :app:dependencies --configuration prodDebugRuntimeClasspath --no-daemon 2>/dev/null \
             | grep -iE 'okhttp|okio' | sort -u | head -30 || echo "(could not resolve the graph)"
+
+      - name: Save the findings as an artifact
+        run: |
+          set -uo pipefail
+          {
+            echo "### OkHttp inspection"
+            echo ""
+            echo "#### aar contents"
+            cat /tmp/probe/report.txt 2>/dev/null || echo "(no report)"
+            echo ""
+            echo "#### resolved okhttp versions"
+            cat /tmp/probe/graph.txt 2>/dev/null || echo "(no graph)"
+          } > "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: okhttp-report
+          path: /tmp/probe/
+          retention-days: 30
+          if-no-files-found: warn
