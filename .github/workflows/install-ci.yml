@@ -1,0 +1,60 @@
+name: Install CI And Clean Up
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the working branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/stable
+
+      - name: Remove the one-shot fix workflows
+        run: |
+          set -euo pipefail
+          for f in prepare-project.yml fix-signing-path.yml fix-manifest.yml fix-ndk.yml fix-signing-path.yml; do
+            if [ -f ".github/workflows/$f" ]; then
+              git rm -q ".github/workflows/$f" && echo "removed $f"
+            fi
+          done
+          echo "--- workflows now ---"
+          ls .github/workflows/
+
+      - name: De-duplicate gradle.properties
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("gradle.properties")
+          lines = p.read_text(encoding="utf-8").splitlines()
+
+          seen = set()
+          out = []
+          for line in lines:
+              m = re.match(r"^\s*([A-Za-z][\w.\-]*)\s*=", line)
+              if m:
+                  key = m.group(1)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+              out.append(line)
+
+          p.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+          print("de-duplicated")
+          PY
+          grep -vE "^\s*#|^\s*$" gradle.properties
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "ci: drop one-shot fix workflows and de-duplicate gradle.properties"
+          git push origin HEAD:fix/stable
