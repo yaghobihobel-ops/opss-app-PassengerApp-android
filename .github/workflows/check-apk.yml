@@ -44,7 +44,9 @@ jobs:
         run: |
           set -uo pipefail
           AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -1)
-          "$AAPT" dump xmltree dist/app.apk --file AndroidManifest.xml > dist/manifest-tree.txt 2>&1
+          "$AAPT" dump xmltree dist/app.apk AndroidManifest.xml > dist/manifest-tree.txt 2>&1
+          head -3 dist/manifest-tree.txt
+          grep -q "E: manifest" dist/manifest-tree.txt || { echo "::error::could not read the manifest"; exit 1; }
 
           # Print each service/activity/receiver together with its exported value,
           # so a missing attribute is visible next to the component that needs it.
