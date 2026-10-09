@@ -158,7 +158,7 @@ jobs:
                         # where a file staged in an earlier step is not visible. The
                         # repository is public, so this needs no token.
                         REPO="${{ github.repository }}"
-                        URL=$(gh release view --repo "$REPO" --json assets --jq '.assets[] | select(.name | endswith(".apk")) | .url' 2>/dev/null | head -1)
+                        URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' 2>/dev/null | head -1)
                         echo "release url: ${URL:-none}"
                         APK="$GITHUB_WORKSPACE/apk-for-emulator.apk"
                         [ -n "$URL" ] && curl -sSL -o "$APK" "$URL"
