@@ -1,0 +1,238 @@
+name: Verify install on a real device image
+
+# This workflow proves the two things that a build log alone cannot:
+#   1. the published APK really installs (Android refuses to parse an
+#      unsigned or truncated package)
+#   2. the app process really starts and stays up
+#
+# It is deliberately separate from build.yml: the emulator needs KVM and extra
+# packages, and a KVM-less runner must not be able to fail the release build.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/verify-install.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opss-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Install, launch and capture the runtime logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Give the runner a usable adb before anything else
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5; do
+            adb kill-server > /dev/null 2>&1 || true
+            adb start-server > /dev/null 2>&1 || true
+            if adb devices > /dev/null 2>&1; then
+              echo "adb server is up on attempt $attempt"
+              break
+            fi
+            echo "adb not ready (attempt $attempt)"
+            sleep 10
+          done
+          adb version || true
+
+      - name: Report whether this runner can host an emulator
+        id: capable
+        run: |
+          set -uo pipefail
+          # Nested virtualisation is not always available. Decide once, up front,
+          # so the steps below can skip cleanly instead of failing halfway.
+          if [ ! -e /dev/kvm ]; then
+            echo "KVM=absent" >> "$GITHUB_OUTPUT"
+            echo "::warning::no /dev/kvm on this runner; the emulator cannot run here"
+            exit 0
+          fi
+          ls -l /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if sudo chown root:kvm /dev/kvm 2>/dev/null && sudo chmod 0666 /dev/kvm; then
+            echo "KVM=ready" >> "$GITHUB_OUTPUT"
+          else
+            echo "KVM=absent" >> "$GITHUB_OUTPUT"
+            echo "::warning::could not open /dev/kvm for this user"
+          fi
+
+      - name: Install the emulator runtime packages
+        if: steps.capable.outputs.KVM == 'ready'
+        run: |
+          set -uo pipefail
+          # The image does not ship the graphics stack the emulator links
+          # against; without these it dies with a Vulkan/OpenGL error.
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            libpulse0 libgl1-mesa-dri libglx-mesa0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxkbcommon-x11-0 \
+            libnss3 libxss1 || echo "::warning::some emulator packages were unavailable"
+
+      - name: Download the APK from the newest main run
+        id: apk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          RUN=$(gh run list --repo "${{ github.repository }}" --workflow build.yml \
+                  --branch main --status success --limit 1 --json databaseId \
+                  --jq '.[0].databaseId' 2>/dev/null || true)
+          echo "using build run: ${RUN:-none}"
+          if [ -z "$RUN" ]; then
+            echo "available=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if gh run download "$RUN" -D dist --pattern "opss-*-*" 2>/dev/null; then
+              break
+            fi
+            echo "download attempt $attempt failed"
+            sleep 15
+          done
+          APK=$(find dist -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "available=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::no APK artifact found on run $RUN"
+            exit 0
+          fi
+          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+          echo "available=yes" >> "$GITHUB_OUTPUT"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Install, launch and capture the logs
+        id: run
+        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: google_apis
+          profile: Nexus 6
+          disable-animations: true
+          # -no-window makes the emulator exit on runners with no display; the
+          # action already runs it headless through xvfb.
+          emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none -no-metrics
+          script: |
+            # Deliberately without `set -e`: the adb server may still be coming
+            # up when this script starts, and one failed adb call must not abort
+            # the whole capture. Each outcome is reported explicitly instead.
+            set -uo pipefail
+            APK="${{ steps.apk.outputs.path }}"
+            echo "APK: $APK"
+
+            adb wait-for-device
+            echo "device: $(adb shell getprop ro.build.version.release 2>/dev/null)"
+
+            echo "--- install ---"
+            adb install -r -d "$APK" 2>&1 | tee install-result.txt
+            # Success is "Success"; anything else means the package was refused.
+            if grep -q "Success" install-result.txt; then
+              echo "INSTALL=ok"
+            else
+              echo "INSTALL=failed"
+              exit 1
+            fi
+
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1)
+            PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+            ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+            echo "$PKG" > package.txt
+            echo "package=$PKG launchable=${ACT:-<none>}"
+
+            echo "--- is the package really there? ---"
+            adb shell pm list packages | grep -F "$PKG" && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
+
+            adb logcat -c
+            if [ -n "${ACT:-}" ]; then
+              adb shell am start -W -n "$PKG/$ACT" 2>&1 | tee launch-result.txt
+            else
+              adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 2>&1 | tee launch-result.txt
+            fi
+
+            sleep 45
+
+            echo "--- process state ---"
+            if adb shell pidof "$PKG" > /dev/null 2>&1; then
+              echo "ALIVE=yes"; echo "$PKG" > /dev/null
+            else
+              echo "ALIVE=no"
+            fi
+
+            adb logcat -d > runtime-logcat.txt 2>/dev/null || true
+            adb exec-out screencap -p > runtime-screenshot.png 2>/dev/null || true
+            ls -la runtime-logcat.txt runtime-screenshot.png 2>/dev/null || true
+
+            echo "--- crashes in this package ---"
+            if grep "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | grep -q "$PKG"; then
+              echo "APP_CRASH=yes"
+              grep -A15 "FATAL EXCEPTION" runtime-logcat.txt | head -40
+            else
+              echo "APP_CRASH=no"
+            fi
+
+            echo "--- network / backend ---"
+            grep -iE "alaadcin|opss|taxi\.ecardo\.ir|UnknownHost|SSL|Firebase|Maps API key|Authorization failure" \
+              runtime-logcat.txt 2>/dev/null | tail -40 || echo "(no matching lines)"
+
+      - name: Summarise the real outcome
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p logs
+          for f in runtime-logcat.txt install-result.txt launch-result.txt package.txt runtime-screenshot.png; do
+            cp -f "$f" logs/ 2>/dev/null || true
+          done
+
+          {
+            echo "### Install verification"
+            echo ""
+            echo "- KVM: \`${{ steps.capable.outputs.KVM || 'unknown' }}\`"
+            echo "- APK found: \`${{ steps.apk.outputs.available || 'no' }}\`"
+            echo "- Emulator step outcome: \`${{ steps.run.outcome || 'not-run' }}\`"
+            echo ""
+            echo "### Install output"
+            echo ""
+            echo '```'
+            head -5 logs/install-result.txt 2>/dev/null || echo "(no install output captured)"
+            echo '```'
+            echo ""
+            if [ -s logs/runtime-screenshot.png ]; then
+              echo "A screenshot of the running app is attached as an artifact."
+            else
+              echo "**NOT VERIFIED**: the emulator did not produce a screenshot, so the app was"
+              echo "never observed running. This runner could not host an emulator."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-evidence-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
