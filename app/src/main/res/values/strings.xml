@@ -4,7 +4,7 @@
     <string name="google_android_geo_api_key">AIzaSyAyvpoGJwo9jr_-BNPzkEoli5wv1wVqwYg</string>
 
 
-    <string name="app_name">Alaadcin</string>
+    <string name="app_name">opss</string>
     <string name="demo_text">Note:\nSince this is the demo version, please use below dummy credit/debit card for testing. The actual payment will not be deducted.</string>
     <string name="demo_mobile_help">Note: Please enter the OTP \"1234\" If you do not receive SMS/EMAIL on your registered number in next one minute.</string>
 
