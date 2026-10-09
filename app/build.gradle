@@ -56,9 +56,7 @@ android {
             abiFilters 'armeabi-v7a', 'arm64-v8a'
         }
         vectorDrawables.useSupportLibrary = true
-        // Ships en + fa only; every other locale Android looks for
         // would otherwise be packaged as well.
-        resourceConfigurations = ['en', 'fa']
         javaCompileOptions {
             annotationProcessorOptions {
                 includeCompileClasspath true
