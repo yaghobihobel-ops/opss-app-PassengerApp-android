@@ -186,9 +186,14 @@ jobs:
                         # It also means `set -o pipefail` is unavailable, so verdicts are
                         # read from the output text rather than from an exit status.
                         set -u
-                        APK="${{ steps.apk.outputs.path }}"
-                        echo "APK: $APK"
-                        test -f "$APK" && echo "APK file exists" || { echo "APK file missing at $APK"; exit 1; }
+                        # Do not receive the path as an expression: the action evaluates its
+                        # `with:` block early, and the download step's output is not visible
+                        # there yet, so the script used to receive an empty string. The file
+                        # is on this same runner, so look for it instead.
+                        APK=$(find "$GITHUB_WORKSPACE/dist" -name '*.apk' -type f 2>/dev/null | sort | tail -1)
+                        echo "APK: ${APK:-<not found>}"
+                        test -n "$APK" && test -f "$APK" || { echo "APK_MISSING=1" > install-verdict.txt; exit 1; }
+                        echo "APK size: $(du -h "$APK" | cut -f1)"
 
                         adb wait-for-device
                         echo "device android=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
