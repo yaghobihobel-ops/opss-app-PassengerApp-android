@@ -33,6 +33,32 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref_name }}
 
+      # The version has to be raised *before* Gradle runs, otherwise the APK
+      # is built with the previous versionCode while the release tag carries the
+      # next one. This edit stays in the workspace only; the commit happens in the
+      # release job, which is the one holding write access.
+      - name: Reserve the next version
+        id: bump
+        run: |
+          set -euo pipefail
+          GRADLE=app/build.gradle
+          CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1 | tr -d ' ')
+          CURRENT_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' "$GRADLE" | head -1)
+
+          MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
+          MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
+          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3); PAT=${PAT:-0}
+          NEXT="$MAJ.$MIN.$((PAT + 1))"
+          NEXT_CODE=$((CURRENT_CODE + 1))
+
+          echo "current: $CURRENT_NAME (code $CURRENT_CODE) -> next: $NEXT (code $NEXT_CODE)"
+          sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NEXT\2/" "$GRADLE"
+          sed -i -E "s/(versionCode\s+)[0-9]+/\1$NEXT_CODE/" "$GRADLE"
+          grep -nE 'versionName|versionCode' "$GRADLE" | head -2
+
+          echo "name=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
+
       - name: Set up JDK 17 for the SDK tools
         uses: actions/setup-java@v4
         with:
@@ -93,8 +119,8 @@ jobs:
           APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
           test -n "$APK" || { echo "ERROR: no APK produced"; exit 1; }
 
-          NAME=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -1)
-          NAME=${NAME// /}
+          NAME=${{ steps.bump.outputs.name }}
+          test -n "$NAME" || { echo "ERROR: version not resolved"; exit 1; }
           cp "$APK" "dist/opss-${{ vars.APP_SLUG || 'passenger' }}-$NAME.apk"
           ls -la dist
 
@@ -104,9 +130,14 @@ jobs:
           unzip -t "dist/"*.apk | tail -2
 
           echo "--- signature ---"
-          "$ANDROID_HOME/build-tools/31.0.0/apksigner" verify --print-certs "dist/"*.apk || \
-            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "dist/"*.apk || \
-            echo "apksigner unavailable"
+          # Find apksigner wherever this image actually put build-tools.
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -1)
+          test -n "$APKSIGNER" || { echo "::error::apksigner not found under $ANDROID_HOME/build-tools"; exit 1; }
+          echo "using $APKSIGNER"
+          # An unsigned APK cannot be parsed by Android, so this must fail the
+          # build rather than quietly shipping an uninstallable file.
+          "$APKSIGNER" verify --print-certs --verbose "dist/"*.apk || \
+            { echo "::error::the APK is not correctly signed"; exit 1; }
 
           echo "--- badging ---"
           AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort | tail -1)
@@ -393,34 +424,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Bump the patch version
-        id: bump
+      - name: Commit the version the APK was actually built with
         run: |
           set -euo pipefail
+          NAME="${{ needs.build.outputs.version_name }}"
+          CODE="${{ needs.build.outputs.version_code }}"
+          test -n "$NAME" || { echo "ERROR: the build job did not report a version"; exit 1; }
+
           GRADLE=app/build.gradle
-          CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1 | tr -d ' ')
-          CURRENT_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' "$GRADLE" | head -1)
+          sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NAME\2/" "$GRADLE"
+          sed -i -E "s/(versionCode\s+)[0-9]+/\1$CODE/" "$GRADLE"
+          grep -nE 'versionName|versionCode' "$GRADLE" | head -2
 
-          MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
-          MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
-          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3); PAT=${PAT:-0}
-          NEXT="$MAJ.$MIN.$((PAT + 1))"
-          NEXT_CODE=$((CURRENT_CODE + 1))
-
-          echo "current: $CURRENT_NAME (code $CURRENT_CODE) -> next: $NEXT (code $NEXT_CODE)"
-          sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NEXT\2/" "$GRADLE"
-          sed -i -E "s/(versionCode\s+)[0-9]+/\1$NEXT_CODE/" "$GRADLE"
-
-          echo "name=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
-
-      - name: Commit the bump without retriggering this workflow
-        run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/build.gradle
-          git commit -m "chore(release): bump to ${{ steps.bump.outputs.name }} (versionCode ${{ steps.bump.outputs.code }}) [skip ci]"
+          git add "$GRADLE"
+          git commit -m "chore(release): bump to $NAME (versionCode $CODE) [skip ci]"
           git push origin HEAD:main
 
       - name: Download the APK from this run
@@ -444,7 +463,7 @@ jobs:
       - name: Publish the APK to the matching release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.bump.outputs.name }}
+          VERSION: ${{ needs.build.outputs.version_name }}
         run: |
           set -euo pipefail
           TAG="v$VERSION"
@@ -457,7 +476,7 @@ jobs:
           # will not install over an existing build signed with the vendor key.
           # Document that on the release page instead of failing silently.
           {
-            echo "**Version $VERSION** (versionCode ${{ steps.bump.outputs.code }})"
+            echo "**Version $VERSION** (versionCode ${{ needs.build.outputs.version_code }})"
             echo ""
             echo "> **Install note:** this is a *debug* build, signed with the standard"
             echo "> Android debug key. If it will not install on your phone, uninstall the"
@@ -490,6 +509,6 @@ jobs:
           {
             echo "### Release published"
             echo ""
-            echo "- Tag: \`v${{ steps.bump.outputs.name }}\`"
-            echo "- Asset: \`opss-${{ vars.APP_SLUG || 'passenger' }}-${{ steps.bump.outputs.name }}.apk\`"
+            echo "- Tag: \`v${{ needs.build.outputs.version_name }}\`"
+            echo "- Asset: \`opss-${{ vars.APP_SLUG || 'passenger' }}-${{ needs.build.outputs.version_name }}.apk\`"
           } >> "$GITHUB_STEP_SUMMARY"
