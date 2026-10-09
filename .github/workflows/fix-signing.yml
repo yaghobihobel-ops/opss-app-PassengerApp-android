@@ -22,7 +22,27 @@ jobs:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
 
-      - name: Set up JDK 11
+      - name: Set up Java and the Android SDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the NDK the project pins
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
+          if [ -n "${NDK:-}" ]; then
+            for attempt in 1 2 3; do
+              yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" > /dev/null 2>&1 || true
+              [ -d "$ANDROID_HOME/ndk/$NDK" ] && { echo "NDK $NDK ready"; break; }
+              sleep 8
+            done
+          fi
+          ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
+
+      - name: Set up JDK 11 for Gradle
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -86,7 +106,6 @@ jobs:
           unzip -l dist/opss-passenger-debug.apk | grep -E "META-INF/.*\.(RSA|DSA|EC|SF)" | head -4 || echo "  (no v1 signature files)"
 
       - name: Commit
-        if: success()
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
