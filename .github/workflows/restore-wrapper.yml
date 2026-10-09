@@ -1,0 +1,67 @@
+name: Restore Gradle Wrapper
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: fix/stable
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Report what is missing
+        run: |
+          set -euo pipefail
+          ls -la gradle/wrapper/ 2>/dev/null || echo "(no gradle/wrapper directory)"
+          test -f gradle/wrapper/gradle-wrapper.jar \
+            && echo "wrapper jar: present" \
+            || echo "wrapper jar: MISSING"
+          cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "(no properties)"
+
+      - name: Generate the wrapper from the official distribution
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP 'gradle-\K[0-9.]+(?=-all\.zip)' gradle/wrapper/gradle-wrapper.properties)
+          echo "Gradle version: $VERSION"
+
+          cd /tmp
+          curl -fsSL -o gradle-dist.zip "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip"
+          unzip -q gradle-dist.zip
+          mkdir -p /tmp/wrap && cd /tmp/wrap
+          "/tmp/gradle-${VERSION}/bin/gradle" wrapper --gradle-version "$VERSION" --quiet
+
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p gradle/wrapper
+          cp /tmp/wrap/gradlew /tmp/wrap/gradlew.bat .
+          cp /tmp/wrap/gradle/wrapper/gradle-wrapper.jar gradle/wrapper/
+          chmod +x gradlew
+          ls -la gradle/wrapper/ gradlew
+          test -s gradle/wrapper/gradle-wrapper.jar || { echo "ERROR: jar still empty"; exit 1; }
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradle/wrapper gradlew gradlew.bat
+          git diff --cached --quiet || git commit -m "fix(ci): restore the Gradle wrapper jar missing from the vendor zip"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:fix/stable 2>/dev/null; then
+              echo "pushed to fix/stable"; break
+            fi
+            git pull --rebase --autostash origin fix/stable
+            [ "$attempt" = "3" ] && echo "::warning::push did not land"
+          done
