@@ -82,9 +82,10 @@ jobs:
         if: steps.capable.outputs.KVM == 'ready'
         run: |
           set -uo pipefail
-          # The image does not ship the Qt/GL stack the emulator links against.
-          # Without it the emulator dies at startup with "no Qt platform plugin
-          # could be initialized", and nothing downstream can ever run.
+          # The image does not ship the Qt/GL/X11 stack the emulator links
+          # against. Without it the emulator dies at startup with "no Qt
+          # platform plugin could be initialized" or "Could not open libX11.so",
+          # and nothing downstream can ever run.
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             libpulse0 libgl1-mesa-dri libglx-mesa0 libxcb-cursor0 \
@@ -93,8 +94,9 @@ jobs:
             libxkbcommon-x11-0 libnss3 libxss1 libxrandr2 libxi6 \
             libxcursor1 libxdamage1 libxfixes3 libasound2t64 \
             libqt5gui5 libqt5widgets5 xvfb x11-utils \
+            libx11-6 libx11-xcb1 libxext6 libxrender1 libxtst6 \
             || echo "::warning::some emulator packages were unavailable"
-          dpkg -l libqt5gui5 2>/dev/null | tail -1 || true
+          dpkg -l libqt5gui5 libx11-6 2>/dev/null | grep "^ii" || true
 
           # The emulator is a Qt application and needs a display server. The
           # action starts its own xvfb, but DISPLAY does not always reach the
@@ -159,7 +161,7 @@ jobs:
           # No -no-window: it makes the emulator exit on runners without a
           # display, and the action already runs it headless under xvfb.
           # -gpu swiftshader avoids needing a real Vulkan driver.
-          emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none -no-metrics
+          emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader -camera-back none -no-metrics
           # The default 600s is not always enough for a cold image on a busy
           # runner; without this the step fails on the boot timeout alone.
           emulator-boot-timeout: 900
