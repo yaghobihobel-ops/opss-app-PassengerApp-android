@@ -83,6 +83,12 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+          echo "--- ABIs packaged, verbatim ---"
+          unzip -l dist/app.apk | grep "lib/" | awk -F/ '{print $2}' | sort -u
+          echo "--- native libraries ---"
+          unzip -l dist/app.apk | grep '\.so$' | awk '{print $1, $4}'
+          echo "--- size ---"
+          du -h dist/app.apk
           echo "min_sdk=$MIN" >> "$GITHUB_OUTPUT"
           echo "target_sdk=$TARGET" >> "$GITHUB_OUTPUT"
           echo "abis=$ABIS" >> "$GITHUB_OUTPUT"
