@@ -1,0 +1,75 @@
+name: Inspect the bundled OkHttp
+
+# The app ships projectlibfile.aar, which contains its own okhttp3 classes.
+# The build therefore has to exclude the transitive okhttp, but the app also
+# needs a modern okhttp at runtime (Firebase Crashlytics calls
+# OkHttpClient$Builder.callTimeout, added in 3.12). This workflow reports which
+# okhttp the aar actually bundles, so the right version can be forced.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/libs/**'
+      - 'app/build.gradle'
+      - '.github/workflows/inspect-okhttp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Report the OkHttp version inside the bundled aars
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: List the bundled aars
+        run: |
+          set -uo pipefail
+          ls -la app/libs/
+
+      - name: Find every okhttp class each aar contains
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/probe && cd /tmp/probe
+          for AAR in "$GITHUB_WORKSPACE"/app/libs/*.aar; do
+            NAME=$(basename "$AAR" .aar)
+            echo "==================== $NAME ===================="
+            rm -rf "$NAME" && mkdir -p "$NAME" && cd "$NAME"
+            unzip -o -q "$AAR" 2>/dev/null || { echo "  (not a readable zip)"; cd ..; continue; }
+            ls
+            echo "--- okhttp3 classes ---"
+            if [ -d classes.jar ]; then
+              unzip -l classes.jar 2>/dev/null | grep -c "okhttp3" | sed 's/^/  okhttp3 entries: /'
+              unzip -p classes.jar 2>/dev/null > /dev/null
+              rm -rf x && mkdir x && cd x && unzip -o -q ../classes.jar 2>/dev/null
+              find . -path '*okhttp3*' -name '*.class' | head -5
+              echo "  --- does it have callTimeout (added in okhttp 3.12)? ---"
+              if [ -d okhttp3 ]; then
+                if javap -classpath . okhttp3.OkHttpClient\$Builder 2>/dev/null | grep -q callTimeout; then
+                  echo "  YES: callTimeout is present"
+                else
+                  echo "  NO: callTimeout is missing, so this okhttp is older than 3.12"
+                fi
+              else
+                echo "  no okhttp3 package in this aar"
+              fi
+            else
+              echo "  no classes.jar (resources only?)"
+            fi
+            cd /tmp/probe
+          done
+
+      - name: Show the resolved dependency graph for okhttp
+        run: |
+          set -uo pipefail
+          chmod +x gradlew 2>/dev/null || true
+          ./gradlew :app:dependencies --configuration prodDebugRuntimeClasspath --no-daemon 2>/dev/null \
+            | grep -iE 'okhttp|okio' | sort -u | head -30 || echo "(could not resolve the graph)"
