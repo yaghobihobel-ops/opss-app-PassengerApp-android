@@ -147,6 +147,10 @@ jobs:
           set -euo pipefail
           # The vendor zip lost the executable bit on gradlew.
           chmod +x gradlew
+          # A previous run may have left dex output from before the vendored aar
+          # was stripped, and an incremental build would merge the old
+          # okhttp3 classes back in.
+          rm -rf app/build
           # Skip configuration-time work we do not need and keep the daemon off
           # so a failed build does not leak a JVM into the next step.
           ./gradlew assembleProdDebug --no-daemon --stacktrace \
