@@ -3,6 +3,9 @@ apply plugin: 'realm-android'
 apply plugin: 'com.google.firebase.crashlytics'
 
 
+// Override from the CLI: ./gradlew assembleProdDebug -PSERVER_BASE_URL=https://host/
+ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')
+
 android {
     configurations {
         all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'
@@ -43,8 +46,19 @@ android {
         targetSdkVersion 31
         versionCode 31
         versionName "0.0.1"
+        // Single source of truth for the backend address. Override per build
+        // with -PSERVER_BASE_URL=https://host/ on the command line.
+        buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "\""
+        buildConfigField "String", "API_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "webservice_shark.php\""
         multiDexEnabled true
+        // Real phones use these two; the emulator ABIs are dead weight.
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
         vectorDrawables.useSupportLibrary = true
+        // Ships en + fa only; every other locale Android looks for
+        // would otherwise be packaged as well.
+        resourceConfigurations = ['en', 'fa']
         javaCompileOptions {
             annotationProcessorOptions {
                 includeCompileClasspath true
