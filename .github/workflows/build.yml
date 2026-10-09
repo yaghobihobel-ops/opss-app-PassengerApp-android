@@ -125,12 +125,19 @@ jobs:
             echo "$NAME: $COUNT okhttp3 entries bundled"
             [ "${COUNT:-0}" -gt 0 ] || continue
 
-            # Rebuild classes.jar from every package except okhttp3.
+            # Rebuild classes.jar without the vendored okhttp, but keep the
+            # project's own interceptor: com/rest/RestClient.java constructs
+            # okhttp3.logging.HttpLoggingInterceptorPrj, and deleting the whole
+            # package left the app crashing with NoClassDefFoundError on the
+            # first network call.
             mkdir -p "$WORK/$NAME/x"
             unzip -o -q "$WORK/$NAME/classes.jar" -d "$WORK/$NAME/x"
-            find "$WORK/$NAME/x" -type d -name okhttp3 -prune -exec rm -rf {} +
+            find "$WORK/$NAME/x/okhttp3" -type f -name '*.class'               ! -name 'HttpLoggingInterceptorPrj*' -delete 2>/dev/null || true
+            # Drop any now-empty okhttp3 subpackage except the one we kept.
+            find "$WORK/$NAME/x/okhttp3" -mindepth 1 -type d -empty -delete 2>/dev/null || true
             LEFT=$(find "$WORK/$NAME/x" -name '*.class' | wc -l)
-            echo "$NAME: keeping $LEFT classes, dropping okhttp3"
+            echo "$NAME: keeping $LEFT classes, vendored okhttp removed"
+            find "$WORK/$NAME/x/okhttp3" -name '*.class' 2>/dev/null | sed 's/^/  kept: /' || true
 
             rm -f "$WORK/$NAME/classes.jar"
             (cd "$WORK/$NAME/x" && zip -q -r "../classes.jar" .)
