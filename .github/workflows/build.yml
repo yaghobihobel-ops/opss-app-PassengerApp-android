@@ -2,23 +2,70 @@ name: Build and Release
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - 'fix/**'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch to build (defaults to the one that owns the workflow)'
+        required: false
+        default: ''
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: opss-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build debug APK and publish release
+    name: Build debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version_name: ${{ steps.bump.outputs.name }}
+      version_code: ${{ steps.bump.outputs.code }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref_name }}
 
-      - name: Set up JDK 11
+      - name: Set up JDK 17 for the SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          # sdkmanager is compiled for Java 17, so it must not run under the
+          # JDK 11 that Gradle needs.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
+          if [ -n "${NDK:-}" ]; then
+            echo "Installing ndk;$NDK"
+            for attempt in 1 2 3; do
+              yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" 2>&1 | tail -3 || true
+              if [ -d "$ANDROID_HOME/ndk/$NDK" ]; then
+                echo "NDK $NDK installed"; break
+              fi
+              echo "install attempt $attempt failed"
+              sleep 10
+            done
+          fi
+
+          echo "NDK present:"; ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
+          if [ -n "${NDK:-}" ] && [ ! -d "$ANDROID_HOME/ndk/$NDK" ]; then
+            echo "::error::NDK $NDK could not be installed; image ships: $(ls "$ANDROID_HOME/ndk" 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
+
+      - name: Set up JDK 11 for Gradle
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -26,140 +73,276 @@ jobs:
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Accept Android SDK licenses and install the NDK
+      - name: Build prod debug APK
         run: |
           set -euo pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          # The vendor zip lost the executable bit on gradlew.
+          chmod +x gradlew
+          ./gradlew assembleProdDebug --no-daemon --stacktrace
 
-          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
-          echo "Build asks for NDK: ${NDK:-<not pinned>}"
+      - name: Collect APK and read its badging
+        id: apk
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK" || { echo "ERROR: no APK produced"; exit 1; }
 
-          if [ -n "${NDK:-}" ]; then
-            echo "Installing ndk;$NDK"
-            for attempt in 1 2 3; do
-              if yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" 2>&1 | tail -3; then
-                break
-              fi
-              echo "install attempt $attempt failed, retrying"
-              sleep 10
-            done
+          NAME=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -1)
+          NAME=${NAME// /}
+          cp "$APK" "dist/opss-${{ vars.APP_SLUG || 'passenger' }}-$NAME.apk"
+          ls -la dist
+
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+          echo "--- unzip integrity ---"
+          unzip -t "dist/"*.apk | tail -2
+
+          echo "--- signature ---"
+          "$ANDROID_HOME/build-tools/31.0.0/apksigner" verify --print-certs "dist/"*.apk || \
+            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "dist/"*.apk || \
+            echo "apksigner unavailable"
+
+          echo "--- badging ---"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort | tail -1)
+          if [ -n "$AAPT" ]; then
+            "$AAPT" dump badging "dist/"*.apk | \
+              grep -E "^package|sdkVersion|targetSdkVersion|uses-permission|native-code|application-label" || true
+          else
+            echo "aapt not available; skipping badging"
           fi
+          unzip -l "dist/"*.apk | grep "lib/" | awk -F/ '{print $2}' | sort -u
 
-          echo "NDK revisions present:"
-          ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
-          if [ -n "${NDK:-}" ] && [ ! -d "$ANDROID_HOME/ndk/$NDK" ]; then
-            echo "::warning::NDK $NDK is not on the runner; the image ships newer revisions"
-          fi
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opss-${{ vars.APP_SLUG || 'passenger' }}-${{ steps.apk.outputs.name }}
+          path: dist/*.apk
+          retention-days: 30
 
-      - name: Work out the bumped version
-        id: version
+      - name: Write step summary
+        run: |
+          {
+            echo "### Build summary"
+            echo ""
+            echo "- Branch: \`${{ github.ref_name }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- APK: \`opss-${{ vars.APP_SLUG || 'passenger' }}-${{ steps.apk.outputs.name }}.apk\`"
+            echo "- APK size: $(du -h dist/*.apk | cut -f1)"
+            echo "- ABIs: $(unzip -l dist/*.apk | grep -o 'lib/[a-z0-9_-]*' | cut -d/ -f2 | sort -u | tr '\n' ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-test:
+    name: Smoke test on emulator
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref_name }}
+
+      - name: Set up Java for the emulator tooling
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download the APK from the build job
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: opss-${{ vars.APP_SLUG || 'passenger' }}-*
+          merge-multiple: true
+
+      - name: Confirm the APK arrived
+        run: |
+          set -euo pipefail
+          ls -la dist
+          test -n "$(find dist -name '*.apk' | head -1)" || { echo "ERROR: no APK downloaded"; exit 1; }
+
+      - name: Enable KVM
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the emulator and launch the app
+        id: emulator
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: google_apis
+          profile: Nexus 6
+          disable-animations: true
+          # Do not fail the run when the emulator cannot start; the step below
+          # reports the real outcome instead of faking a pass.
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none
+          script: |
+            set -euo pipefail
+            APK=$(find dist -name '*.apk' | head -1)
+            echo "APK: $APK"
+            adb install -r "$APK"
+
+            # aapt is not on PATH inside the emulator action; resolve it.
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort | tail -1)
+            echo "aapt: ${AAPT:-<not found>}"
+            test -n "$AAPT" || { echo "ERROR: aapt not found under $ANDROID_HOME/build-tools"; exit 1; }
+
+            PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+            ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+            test -n "$PKG" || { echo "ERROR: could not read the package name"; exit 1; }
+            echo "package=$PKG launchable=${ACT:-<none>}"
+            adb logcat -c
+            adb shell am start -n "$PKG/$ACT" || adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1
+            sleep 30
+            adb shell pidof "$PKG" > /dev/null && echo "PROCESS_ALIVE=yes" || echo "PROCESS_ALIVE=no"
+            adb exec-out screencap -p > smoke-screenshot.png
+            adb logcat -d > smoke-logcat.txt
+            echo "--- crash scan ---"
+            if grep -E "FATAL EXCEPTION|ANR in" smoke-logcat.txt | grep "$PKG"; then
+              echo "SMOKE_FAILED=crash"; exit 1
+            fi
+            echo "SMOKE_FAILED=no"
+            echo "--- startup errors ---"
+            grep -iE "E/AndroidRuntime|FirebaseInitProvider.*failed|Maps.*API key|Authorization failure" smoke-logcat.txt | head -10 || true
+
+      - name: Report the real smoke test outcome
+        if: always()
+        run: |
+          set -euo pipefail
+          RESULT="${{ steps.emulator.outcome }}"
+          echo "emulator step outcome: ${RESULT:-not-run}"
+          {
+            echo "### Smoke test"
+            echo ""
+            if [ "${RESULT}" = "success" ]; then
+              echo "- Emulator ran and the script completed. See the logcat artifact for crash scanning."
+            else
+              echo "- **NOT VERIFIED**: the emulator step did not complete (outcome: ${RESULT:-unknown})."
+              echo "  This runner image did not give a usable emulator, so runtime behaviour"
+              echo "  is still unproven. It needs a real device or a working emulator."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload smoke test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-evidence-${{ github.run_id }}
+          path: |
+            smoke-logcat.txt
+            smoke-screenshot.png
+          retention-days: 14
+          if-no-files-found: warn
+
+  release:
+    name: Bump version and publish release
+    needs: [ build, smoke-test ]
+    if: github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Java for the release tooling
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Bump the patch version
+        id: bump
         run: |
           set -euo pipefail
           GRADLE=app/build.gradle
-
-          # The vendor shipped versionName as "5  .0" — stray spaces break any
-          # numeric comparison, so normalise before bumping.
-          sed -i -E 's/versionName[[:space:]]+"[^"]*"/versionName "0.0.0"/' "$GRADLE"
-
-          CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1)
+          CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1 | tr -d ' ')
           CURRENT_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' "$GRADLE" | head -1)
 
-          # Standard semver patch bump: 0.0.1 -> 0.0.2 -> 0.0.3
           MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
           MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
-          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3)
-          PAT=${PAT:-0}
+          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3); PAT=${PAT:-0}
           NEXT="$MAJ.$MIN.$((PAT + 1))"
           NEXT_CODE=$((CURRENT_CODE + 1))
 
-          echo "current   versionName=$CURRENT_NAME versionCode=$CURRENT_CODE"
-          echo "next      versionName=$NEXT     versionCode=$NEXT_CODE"
-
+          echo "current: $CURRENT_NAME (code $CURRENT_CODE) -> next: $NEXT (code $NEXT_CODE)"
           sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NEXT\2/" "$GRADLE"
           sed -i -E "s/(versionCode\s+)[0-9]+/\1$NEXT_CODE/" "$GRADLE"
 
-          echo "name=$NEXT"   >> "$GITHUB_OUTPUT"
+          echo "name=$NEXT" >> "$GITHUB_OUTPUT"
           echo "code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
 
-      - name: Commit the version bump
+      - name: Commit the bump without retriggering this workflow
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle
-          git diff --cached --quiet || git commit -m "chore(release): bump to ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})"
-          # Another workflow may have pushed since checkout. Retry with rebase;
-          # a lost race must not fail the build that follows.
-          for attempt in 1 2 3; do
-            if git push origin HEAD:${{ github.event.repository.default_branch }} 2>/dev/null; then
-              echo "version bump pushed"
-              break
-            fi
-            git pull --rebase --autostash origin "${{ github.event.repository.default_branch }}"
-            if [ "$attempt" = "3" ]; then
-              echo "::warning::could not push the version bump; continuing with the local value"
-            fi
-          done
+          git commit -m "chore(release): bump to ${{ steps.bump.outputs.name }} (versionCode ${{ steps.bump.outputs.code }}) [skip ci]"
+          git push origin HEAD:main
 
-      - name: Build prod debug APK
-        run: ./gradlew assembleProdDebug --no-daemon --stacktrace
-
-      - name: Collect APK
+      - name: Publish the APK to the matching release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.bump.outputs.name }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
-          test -n "$APK" || { echo "No APK produced"; exit 1; }
-          cp "$APK" "dist/opss-passenger-${{ steps.version.outputs.name }}.apk"
-          ls -la dist
+          TAG="v$VERSION"
+          gh run download "${{ github.run_id }}" -D /tmp/art --pattern "opss-${{ vars.APP_SLUG || 'passenger' }}-*" || true
+          APK=$(find /tmp/art -name '*.apk' | head -1)
+          test -n "$APK" || { echo "ERROR: APK not found in run artifacts"; exit 1; }
 
-      - name: Write changelog notes
-        id: notes
-        run: |
-          set -euo pipefail
-          PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$PREV" ]; then
-            RANGE="$PREV..HEAD"
-          else
-            RANGE="HEAD~20..HEAD"
-          fi
+          NAME="opss-${{ vars.APP_SLUG || 'passenger' }}-$VERSION.apk"
 
-          SUBJ=$(git log "$RANGE" --pretty='- %s (%h)' | head -30)
-          FILES=$(git diff --name-only "$RANGE" | grep -vE '^(app/build/|dist/)' | head -40 || true)
-          CNT=$(echo "$FILES" | grep -c . || echo 0)
-
+          # A debug build is signed with the throwaway Android debug key, so it
+          # will not install over an existing build signed with the vendor key.
+          # Document that on the release page instead of failing silently.
           {
-            echo "**Version ${{ steps.version.outputs.name }}** (versionCode ${{ steps.version.outputs.code }})"
+            echo "**Version $VERSION** (versionCode ${{ steps.bump.outputs.code }})"
+            echo ""
+            echo "> **Install note:** this is a *debug* build, signed with the standard"
+            echo "> Android debug key. If it will not install on your phone, uninstall the"
+            echo "> previously installed copy first — Android refuses to replace an app"
+            echo "> signed with a different key. Debug builds also report to a placeholder"
+            echo "> Firebase project, so login and push will not work yet."
             echo ""
             echo "### What changed and why"
             echo ""
-            if [ -n "$SUBJ" ]; then echo "$SUBJ"; else echo "- (no commits in range)"; fi
+            git log "${{ github.event.before }}..${{ github.sha }}" --pretty='- %s (%h)' | head -30 || echo "- (initial)"
             echo ""
-            echo "### Files touched (${CNT})"
+            echo "### Files changed"
             echo ""
-            if [ -n "$FILES" ]; then echo '```'; echo "$FILES"; echo '```'; else echo "- build output only"; fi
+            git diff --name-only "${{ github.event.before }}..${{ github.sha }}" | head -40 || true
             echo ""
             echo "---"
-            echo "Built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` on $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo "Built from \`main\` at \`${{ github.sha }}\`."
           } > notes.md
 
-          cat notes.md
-          echo "FILE=notes.md" >> "$GITHUB_OUTPUT"
-
-      - name: Publish APK to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.name }}
-        run: |
-          set -euo pipefail
-          TAG="v${VERSION}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.apk --clobber
-            gh release edit "$TAG" --title "Passenger $TAG" --notes-file notes.md
+            gh release upload "$TAG" "$APK" --clobber
+            gh release edit "$TAG" --title "opss ${{ vars.APP_SLUG || 'passenger' }} $TAG" --notes-file notes.md
           else
-            gh release create "$TAG" dist/*.apk --title "Passenger $TAG" --notes-file notes.md
+            gh release create "$TAG" "$APK" --title "opss ${{ vars.APP_SLUG || 'passenger' }} $TAG" --notes-file notes.md
           fi
-          echo "Release $TAG is live: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          echo "https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release published"
+            echo ""
+            echo "- Tag: \`v${{ steps.bump.outputs.name }}\`"
+            echo "- Asset: \`opss-${{ vars.APP_SLUG || 'passenger' }}-${{ steps.bump.outputs.name }}.apk\`"
+          } >> "$GITHUB_STEP_SUMMARY"
