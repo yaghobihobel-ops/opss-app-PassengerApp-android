@@ -4,7 +4,14 @@ import java.util.ArrayList;
 
 public class CommonUtilities {
     public static final String TOLLURL = "https://fleet.api.here.com/2/calculateroute.json?app_id=";
-    public static final String SERVER = "https://alaadcin.com/";
+    /*
+     * Every other URL in this class is derived from SERVER, so this one line
+     * is the single place the backend is configured. It now reads BuildConfig
+     * instead of a hard-coded vendor domain: the value comes from
+     * -PSERVER_BASE_URL on the command line and defaults to the opss backend.
+     * BuildConfig.SERVER_BASE_URL exists in every build type.
+     */
+    public static final String SERVER = com.alaadcin.user.BuildConfig.SERVER_BASE_URL;
     public static final String SERVER_FOLDER_PATH = "";
     public static final String WEBSERVICE = "webservice_shark.php";
     public static final String SERVER_WEBSERVICE_PATH = SERVER_FOLDER_PATH + WEBSERVICE + "?";
