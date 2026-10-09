@@ -1,0 +1,103 @@
+name: Fix Debug Signing
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to patch'
+        required: false
+        default: 'fix/stable'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Make debug builds use the standard Android debug key
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # defaultConfig inherited the conditional, which evaluated to null on
+          # CI. That also cancels AGP's automatic debug signing, so the APK ships
+          # unsigned and Android refuses to parse it. Debug must always sign with
+          # the well-known debug key; only release may use the vendor keystore.
+          # Drop every existing assignment first, then re-attach one per build type.
+          s = re.sub(r"\n[ \t]*signingConfig [^\n]*\n", "\n", s)
+
+          s = re.sub(
+              r"(buildTypes \{\n( *)release \{\n)",
+              r"\1\2    signingConfig releaseKeystoreFile != null ? signingConfigs.config : signingConfigs.debug\n",
+              s, count=1)
+          s = re.sub(
+              r"(buildTypes \{\n(?:.|\n)*?\n( *)debug \{\n)",
+              r"\1\2    signingConfig signingConfigs.debug\n",
+              s, count=1)
+
+          p.write_text(s, encoding="utf-8")
+          print("signing configs rewritten")
+          PY
+          echo "--- signingConfigs block ---"
+          sed -n '/signingConfigs {/,/^    }/p' app/build.gradle
+          echo "--- buildTypes ---"
+          sed -n '/buildTypes {/,/^    }/p' app/build.gradle | head -20
+          echo "--- any leftovers in defaultConfig ---"
+          sed -n '/defaultConfig {/,/^    }/p' app/build.gradle | grep -n "signingConfig" || echo "  (none)"
+
+      - name: Build and verify the APK signature
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew assembleProdDebug --no-daemon > /tmp/build.log 2>&1 || {
+            echo "build failed:"; tail -25 /tmp/build.log; exit 1; }
+
+          mkdir -p dist
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK" || { echo "ERROR: no APK produced"; exit 1; }
+          cp "$APK" dist/opss-passenger-debug.apk
+
+          echo "--- archive integrity ---"
+          unzip -t dist/opss-passenger-debug.apk | tail -2
+
+          echo "--- signature verification ---"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs dist/opss-passenger-debug.apk | head -20
+
+          echo "--- ZIP entries AGP 3.5 must not emit ---"
+          unzip -l dist/opss-passenger-debug.apk | grep -E "META-INF/.*\.(RSA|DSA|EC|SF)" | head -4 || echo "  (no v1 signature files)"
+
+      - name: Commit
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle
+          git diff --cached --quiet || git commit -m "fix(gradle): sign debug builds with the Android debug key"
+          BRANCH="${{ inputs.branch }}"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$BRANCH" 2>/dev/null; then
+              echo "pushed to $BRANCH"; break
+            fi
+            git pull --rebase --autostash origin "$BRANCH"
+            [ "$attempt" = "3" ] && echo "::warning::push did not land"
+          done
