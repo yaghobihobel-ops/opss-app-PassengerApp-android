@@ -144,82 +144,82 @@ jobs:
           # runner; without this the step fails on the boot timeout alone.
           emulator-boot-timeout: 900
           script: |
-            # This action feeds `script` to `/usr/bin/sh` one line at a time, so
-                        # every construct here stays on one line. A multi-line `while` or
-                        # `if` gets truncated to its first line and dash then fails with
-                        # "Syntax error: end of file unexpected (expecting done)".
-                        # It also means `set -o pipefail` is unavailable, so verdicts are
-                        # read from the output text rather than from an exit status.
+            # This action feeds `script` to `/usr/bin/sh` one line at a time. Two
+                        # consequences, both learned the hard way:
+                        #   1. a multi-line `while` or `if` is truncated to its first line
+                        #      and dash then fails with a syntax error, so every construct
+                        #      here stays on one line;
+                        #   2. each line is a separate `sh -c`, so no variable survives to
+                        #      the next line. Anything a later line needs is recomputed, or
+                        #      written to a file under $GITHUB_WORKSPACE and read back.
+                        # `set -o pipefail` is likewise unavailable, so verdicts are read
+                        # from output text rather than from an exit status.
                         set -u
 
-                        # Fetch the APK from the public release rather than receiving a path.
-                        # The emulator action evaluates its `with:` block before this job's
-                        # step outputs exist, and it runs `script` from a working directory
-                        # where a file staged in an earlier step is not visible. The
-                        # repository is public, so this needs no token.
-                        REPO="${{ github.repository }}"
-                        URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' 2>/dev/null | head -1)
-                        echo "release url: ${URL:-none}"
-                        APK="$GITHUB_WORKSPACE/apk-for-emulator.apk"
-                        [ -n "$URL" ] && curl -sSL -o "$APK" "$URL"
-                        echo "APK: ${APK:-none}"
-                        test -s "$APK" && echo "APK size: $(du -h "$APK" | cut -f1)" || { echo "APK_MISSING=1" > install-verdict.txt; exit 1; }
+                        # Fetch the APK from the public release. The repository is public, so
+                        # no token is needed, and the URL is inlined because a variable set
+                        # on an earlier line would be empty here.
+                        echo "release url: $(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)"
+                        curl -sSL -o "$GITHUB_WORKSPACE/apk.apk" "$(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)"
+                        ls -la "$GITHUB_WORKSPACE/apk.apk"
+                        test -s "$GITHUB_WORKSPACE/apk.apk" && echo "APK_DOWNLOADED=yes" || { echo "APK_MISSING=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
 
                         adb wait-for-device
                         echo "device android=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
 
-                        # boot_completed is 1 only once the package manager is really serving.
-                        # Installing before that returns an empty error, which is impossible
-                        # to tell apart from a package Android refuses.
-                        echo "waiting for the package manager..."
-                        BOOTED=""; i=0; while [ $i -lt 60 ]; do BOOTED=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]'); [ "$BOOTED" = "1" ] && break; i=$((i + 1)); sleep 5; done
-                        echo "boot_completed=${BOOTED:-empty} after $((i * 5))s"
-                        [ "$BOOTED" = "1" ] || { echo "NOT_READY=1" > install-verdict.txt; exit 1; }
+                        # The action reports the device booted before the package manager is
+                        # actually serving. Installing in that window returns an empty error
+                        # that looks exactly like a package Android refuses, so poll until
+                        # boot_completed really reads 1.
+                        i=0; while [ $i -lt 60 ]; do [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')" = "1" ] && break; i=$((i + 1)); sleep 5; done
+                        echo "boot_completed=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]') after $((i * 5))s"
+                        [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')" = "1" ] || { echo "NOT_READY=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
 
                         echo "--- install ---"
-                        adb install -r -d "$APK" > install-result.txt 2>&1
-                        cat install-result.txt
-                        grep -qE '^Success$' install-result.txt && echo "INSTALL=ok" > install-verdict.txt || echo "INSTALL=failed" > install-verdict.txt
-                        cat install-verdict.txt
-                        grep -qx "INSTALL=ok" install-verdict.txt || exit 1
+                        adb install -r -d "$GITHUB_WORKSPACE/apk.apk" > "$GITHUB_WORKSPACE/install-result.txt" 2>&1
+                        cat "$GITHUB_WORKSPACE/install-result.txt"
+                        grep -qE '^Success$' "$GITHUB_WORKSPACE/install-result.txt" && echo "INSTALL=ok" > "$GITHUB_WORKSPACE/install-verdict.txt" || echo "INSTALL=failed" > "$GITHUB_WORKSPACE/install-verdict.txt"
+                        cat "$GITHUB_WORKSPACE/install-verdict.txt"
+                        grep -qx "INSTALL=ok" "$GITHUB_WORKSPACE/install-verdict.txt" || exit 1
 
-                        AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1)
-                        PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-                        ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
-                        echo "$PKG" > package.txt
-                        echo "package=$PKG launchable=${ACT:-none}"
+                        # Record the package name and launcher activity so later lines do not
+                        # have to parse the badging output again.
+                        AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1); "$AAPT" dump badging "$GITHUB_WORKSPACE/apk.apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" > "$GITHUB_WORKSPACE/package.txt"
+                        AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1); "$AAPT" dump badging "$GITHUB_WORKSPACE/apk.apk" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p" > "$GITHUB_WORKSPACE/activity.txt"
+                        echo "package=$(cat "$GITHUB_WORKSPACE/package.txt") launchable=$(cat "$GITHUB_WORKSPACE/activity.txt")"
 
                         echo "--- is the package really installed? ---"
-                        adb shell pm list packages 2>/dev/null | grep -F "$PKG" > /dev/null && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
+                        adb shell pm list packages 2>/dev/null | grep -F "$(cat "$GITHUB_WORKSPACE/package.txt")" > /dev/null && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
 
-                        adb logcat -c
-                        [ -n "$ACT" ] && adb shell am start -W -n "$PKG/$ACT" > launch-result.txt 2>&1 || adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 > launch-result.txt 2>&1
-                        cat launch-result.txt
+                        adb logcat -c || true
+                        adb shell am start -W -n "$(cat "$GITHUB_WORKSPACE/package.txt")/$(cat "$GITHUB_WORKSPACE/activity.txt")" > "$GITHUB_WORKSPACE/launch-result.txt" 2>&1
+                        cat "$GITHUB_WORKSPACE/launch-result.txt"
 
                         sleep 45
 
                         echo "--- process state ---"
-                        adb shell pidof "$PKG" > /dev/null 2>&1 && echo "ALIVE=yes" || echo "ALIVE=no"
+                        adb shell pidof "$(cat "$GITHUB_WORKSPACE/package.txt")" > /dev/null 2>&1 && echo "ALIVE=yes" || echo "ALIVE=no"
 
-                        adb logcat -d > runtime-logcat.txt 2>/dev/null
-                        adb exec-out screencap -p > runtime-screenshot.png 2>/dev/null
-                        ls -la runtime-logcat.txt runtime-screenshot.png 2>/dev/null
+                        adb logcat -d > "$GITHUB_WORKSPACE/runtime-logcat.txt" 2>/dev/null
+                        adb exec-out screencap -p > "$GITHUB_WORKSPACE/runtime-screenshot.png" 2>/dev/null
+                        ls -la "$GITHUB_WORKSPACE/runtime-logcat.txt" "$GITHUB_WORKSPACE/runtime-screenshot.png" 2>/dev/null
 
                         echo "--- crashes in this package ---"
-                        grep "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | grep -q "$PKG" && echo "APP_CRASH=yes" || echo "APP_CRASH=no"
-                        grep -A15 "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | head -40
+                        grep "FATAL EXCEPTION" "$GITHUB_WORKSPACE/runtime-logcat.txt" 2>/dev/null | grep -q "$(cat "$GITHUB_WORKSPACE/package.txt")" && echo "APP_CRASH=yes" || echo "APP_CRASH=no"
+                        grep -A15 "FATAL EXCEPTION" "$GITHUB_WORKSPACE/runtime-logcat.txt" 2>/dev/null | head -40
 
                         echo "--- backend and network ---"
-                        grep -iE "alaadcin|opss|taxi\.ecardo\.ir|UnknownHost|SSLHandshake|Firebase|Maps API key|Authorization failure" runtime-logcat.txt 2>/dev/null | tail -40
+                        grep -iE "alaadcin|opss|taxi\.ecardo\.ir|UnknownHost|SSLHandshake|Firebase|Maps API key|Authorization failure" "$GITHUB_WORKSPACE/runtime-logcat.txt" 2>/dev/null | tail -40
                         echo "(end of app lines)"
 
       - name: Summarise the real outcome
         if: always()
         run: |
           set -uo pipefail
+          # The emulator script writes its evidence under $GITHUB_WORKSPACE.
           mkdir -p logs
           for f in runtime-logcat.txt install-result.txt install-verdict.txt launch-result.txt package.txt runtime-screenshot.png; do
-            cp -f "$f" logs/ 2>/dev/null || true
+            cp -f "$GITHUB_WORKSPACE/$f" logs/ 2>/dev/null || true
           done
 
           KVM="${{ steps.capable.outputs.KVM }}"
