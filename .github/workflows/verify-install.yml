@@ -82,13 +82,19 @@ jobs:
         if: steps.capable.outputs.KVM == 'ready'
         run: |
           set -uo pipefail
-          # The image does not ship the graphics stack the emulator links
-          # against; without these it dies with a Vulkan/OpenGL error.
+          # The image does not ship the Qt/GL stack the emulator links against.
+          # Without it the emulator dies at startup with "no Qt platform plugin
+          # could be initialized", and nothing downstream can ever run.
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             libpulse0 libgl1-mesa-dri libglx-mesa0 libxcb-cursor0 \
-            libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxkbcommon-x11-0 \
-            libnss3 libxss1 || echo "::warning::some emulator packages were unavailable"
+            libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-randr0 \
+            libxcb-render-util0 libxcb-xfixes0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libnss3 libxss1 libxrandr2 libxi6 \
+            libxcursor1 libxdamage1 libxfixes3 libasound2t64 \
+            libqt5gui5 libqt5widgets5 || echo "::warning::some emulator packages were unavailable"
+          echo "--- installed ---"
+          dpkg -l libqt5gui5 2>/dev/null | tail -1 || true
 
       - name: Download the APK from the newest main run
         id: apk
