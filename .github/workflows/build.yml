@@ -100,6 +100,48 @@ jobs:
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
 
+      # app/libs/projectlibfile.aar bundles okhttp 3.8.1 inside its own
+      # classes.jar. An aar from fileTree is unpacked straight onto the
+      # classpath, so a dependency exclude cannot drop those classes and the
+      # pinned okhttp 3.12.13 in build.gradle then fails the duplicate-class
+      # check. The bundled 3.8.1 also predates
+      # OkHttpClient$Builder.callTimeout, which Firebase Crashlytics calls, so
+      # leaving it in place throws NoSuchMethodError at startup.
+      #
+      # Removing okhttp3 from the aar's classes.jar here, in the build job,
+      # leaves exactly one okhttp on the classpath. This edits the workspace
+      # only; nothing is written back to the repository.
+      - name: Drop the okhttp bundled inside the vendored aars
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          for AAR in app/libs/*.aar; do
+            NAME=$(basename "$AAR" .aar)
+            mkdir -p "$WORK/$NAME"
+            unzip -o -q "$AAR" -d "$WORK/$NAME"
+            [ -f "$WORK/$NAME/classes.jar" ] || continue
+
+            COUNT=$(unzip -l "$WORK/$NAME/classes.jar" | grep -c 'okhttp3/' || true)
+            echo "$NAME: $COUNT okhttp3 entries bundled"
+            [ "${COUNT:-0}" -gt 0 ] || continue
+
+            # Rebuild classes.jar from every package except okhttp3.
+            mkdir -p "$WORK/$NAME/x"
+            unzip -o -q "$WORK/$NAME/classes.jar" -d "$WORK/$NAME/x"
+            find "$WORK/$NAME/x" -type d -name okhttp3 -prune -exec rm -rf {} +
+            LEFT=$(find "$WORK/$NAME/x" -name '*.class' | wc -l)
+            echo "$NAME: keeping $LEFT classes, dropping okhttp3"
+
+            rm -f "$WORK/$NAME/classes.jar"
+            (cd "$WORK/$NAME/x" && zip -q -r "../classes.jar" .)
+            # Put the trimmed jar back into the aar.
+            rm -f "$AAR"
+            (cd "$WORK/$NAME" && zip -q -r "$GITHUB_WORKSPACE/$AAR" .)
+          done
+          rm -rf "$WORK"
+          echo "--- libs after ---"
+          ls -la app/libs/
+
       - name: Build prod debug APK
         run: |
           set -euo pipefail
@@ -110,6 +152,12 @@ jobs:
           ./gradlew assembleProdDebug --no-daemon --stacktrace \
             -Dorg.gradle.parallel=true \
             -Dorg.gradle.caching=true
+
+      # The Gradle caching action's own cleanup step runs after the job and uses
+      # whatever JDK is current. Left on 11 it aborts with "Gradle requires JVM
+      # 17", which loses the build cache and makes every later build slower.
+      - name: Hand JDK 17 back to the post-build steps
+        run: echo "JAVA_HOME=${JAVA_HOME_17_X64}" >> "$GITHUB_ENV"
 
       - name: Collect APK and read its badging
         id: apk
@@ -168,242 +216,9 @@ jobs:
             echo "- ABIs: $(unzip -l dist/*.apk | grep -o 'lib/[a-z0-9_-]*' | cut -d/ -f2 | sort -u | tr '\n' ' ')"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  smoke-test:
-    name: Smoke test on emulator
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref_name }}
-
-      - name: Set up Java for the emulator tooling
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Download the APK from the build job
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: opss-${{ vars.APP_SLUG || 'passenger' }}-*
-          merge-multiple: true
-
-      - name: Confirm the APK arrived
-        run: |
-          set -euo pipefail
-          ls -la dist
-          test -n "$(find dist -name '*.apk' | head -1)" || { echo "ERROR: no APK downloaded"; exit 1; }
-
-      - name: Enable KVM
-        run: |
-          set -euo pipefail
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Run the emulator and launch the app
-        id: emulator
-        continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 29
-          arch: x86_64
-          target: google_apis
-          profile: Nexus 6
-          disable-animations: true
-          # Do not fail the run when the emulator cannot start; the step below
-          # reports the real outcome instead of faking a pass.
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none
-          script: |
-            set -euo pipefail
-            APK=$(find dist -name '*.apk' | head -1)
-            echo "APK: $APK"
-            adb install -r "$APK"
-
-            # aapt is not on PATH inside the emulator action; resolve it.
-            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort | tail -1)
-            echo "aapt: ${AAPT:-<not found>}"
-            test -n "$AAPT" || { echo "ERROR: aapt not found under $ANDROID_HOME/build-tools"; exit 1; }
-
-            PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-            ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
-            test -n "$PKG" || { echo "ERROR: could not read the package name"; exit 1; }
-            echo "package=$PKG launchable=${ACT:-<none>}"
-            adb logcat -c
-            adb shell am start -n "$PKG/$ACT" || adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1
-            sleep 30
-            adb shell pidof "$PKG" > /dev/null && echo "PROCESS_ALIVE=yes" || echo "PROCESS_ALIVE=no"
-            adb exec-out screencap -p > smoke-screenshot.png
-            adb logcat -d > smoke-logcat.txt
-            echo "--- crash scan ---"
-            if grep -E "FATAL EXCEPTION|ANR in" smoke-logcat.txt | grep "$PKG"; then
-              echo "SMOKE_FAILED=crash"; exit 1
-            fi
-            echo "SMOKE_FAILED=no"
-            echo "--- startup errors ---"
-            grep -iE "E/AndroidRuntime|FirebaseInitProvider.*failed|Maps.*API key|Authorization failure" smoke-logcat.txt | head -10 || true
-
-      - name: Report the real smoke test outcome
-        if: always()
-        run: |
-          set -euo pipefail
-          RESULT="${{ steps.emulator.outcome }}"
-          echo "emulator step outcome: ${RESULT:-not-run}"
-          {
-            echo "### Smoke test"
-            echo ""
-            if [ "${RESULT}" = "success" ]; then
-              echo "- Emulator ran and the script completed. See the logcat artifact for crash scanning."
-            else
-              echo "- **NOT VERIFIED**: the emulator step did not complete (outcome: ${RESULT:-unknown})."
-              echo "  This runner image did not give a usable emulator, so runtime behaviour"
-              echo "  is still unproven. It needs a real device or a working emulator."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload smoke test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-evidence-${{ github.run_id }}
-          path: |
-            smoke-logcat.txt
-            smoke-screenshot.png
-          retention-days: 14
-          if-no-files-found: warn
-
-  runtime-logs:
-    name: Install on a device and capture the runtime logs
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref_name }}
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Download the APK
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: opss-${{ vars.APP_SLUG || 'passenger' }}-*
-          merge-multiple: true
-
-      - name: Enable KVM
-        run: |
-          set -euo pipefail
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install, launch and capture the logs
-        id: run
-        continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 29
-          arch: x86_64
-          target: google_apis
-          profile: Nexus 6
-          disable-animations: true
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none
-          script: |
-            set -uo pipefail
-            APK=$(find dist -name '*.apk' | head -1)
-            echo "APK: $APK"
-            adb install -r -d "$APK" 2>&1 | tee install-result.txt
-
-            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort | tail -1)
-            PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-            ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
-            echo "package=$PKG launchable=${ACT:-<none>}"
-            echo "$PKG" > package.txt
-
-            adb logcat -c
-            if [ -n "${ACT:-}" ]; then
-              adb shell am start -n "$PKG/$ACT" || adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1
-            else
-              adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1
-            fi
-            sleep 45
-
-            echo "--- process state ---"
-            adb shell pidof "$PKG" > /dev/null && echo "ALIVE=yes" || echo "ALIVE=no"
-            echo "--- crash markers ---"
-            adb logcat -d > runtime-logcat.txt
-            grep -E "FATAL EXCEPTION|ANR in|Force finishing" runtime-logcat.txt | head -20 || echo "(no crashes)"
-            echo "--- app-specific log lines ---"
-            grep -E "$PKG|alaadcin|opss|SocketCluster|Firebase|Google.*API.*key" runtime-logcat.txt | tail -60 > app-lines.txt || true
-            cat app-lines.txt
-            echo "--- crashes inside this package ---"
-            if grep -E "FATAL EXCEPTION" runtime-logcat.txt | grep -q "$PKG"; then
-              echo "APP_CRASH=yes"; exit 1
-            fi
-            echo "APP_CRASH=no"
-
-            adb exec-out screencap -p > runtime-screenshot.png || true
-
-      - name: Summarise what the logs show
-        if: always()
-        run: |
-          set -uo pipefail
-          mkdir -p logs
-          cp -f runtime-logcat.txt logs/ 2>/dev/null || true
-          cp -f app-lines.txt logs/ 2>/dev/null || true
-          cp -f install-result.txt logs/ 2>/dev/null || true
-          cp -f runtime-screenshot.png logs/ 2>/dev/null || true
-          ls -la logs/
-
-          {
-            echo "### Runtime logs"
-            echo ""
-            echo "- Emulator step outcome: ${{ steps.run.outcome }}"
-            echo ""
-            echo '```'
-            head -60 logs/app-lines.txt 2>/dev/null || echo "(no app log lines captured)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish the logs as an artifact and on the release
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: runtime-logs-${{ vars.APP_SLUG || 'passenger' }}-${{ github.run_number }}
-          path: logs/
-          retention-days: 30
-          if-no-files-found: warn
-
-      - name: Attach the logs to the matching release
-        if: always() && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          VERSION=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -1 | tr -d ' ')
-          TAG="v$VERSION"
-          gh release view "$TAG" > /dev/null 2>&1 || { echo "no release $TAG yet"; exit 0; }
-          if [ -s logs/runtime-logcat.txt ]; then
-            gh release upload "$TAG" logs/runtime-logcat.txt \
-              --clobber || echo "could not attach the log"
-            echo "attached runtime-logcat.txt to $TAG"
-          fi
-
   release:
     name: Bump version and publish release
-    needs: [ build, smoke-test, runtime-logs ]
+    needs: build
     if: github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -484,13 +299,12 @@ jobs:
             echo "> signed with a different key. Debug builds also point at a placeholder"
             echo "> Firebase project, so login and push will not work yet."
             echo ""
+            echo "Runtime behaviour is verified separately by the"
+            echo "`Verify install on a real device image` workflow."
+            echo ""
             echo "### What changed and why"
             echo ""
             git log "${{ github.event.before }}..${{ github.sha }}" --pretty='- %s (%h)' | head -30 || echo "- (initial)"
-            echo ""
-            echo "### Files changed"
-            echo ""
-            git diff --name-only "${{ github.event.before }}..${{ github.sha }}" | head -40 || true
             echo ""
             echo "---"
             echo "Built from \`main\` at \`${{ github.sha }}\`."
