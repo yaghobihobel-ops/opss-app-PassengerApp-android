@@ -157,6 +157,22 @@ jobs:
           # so the script needs an absolute path, not the relative one found here.
           echo "path=$ABS" >> "$GITHUB_OUTPUT"
 
+      - name: Publish the APK for the emulator step
+        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-for-emulator
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Restore the APK next to the emulator step
+        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-for-emulator
+          path: dist
+
       - name: Install, launch and capture the logs
         id: run
         if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
