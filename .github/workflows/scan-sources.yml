@@ -51,6 +51,21 @@ jobs:
           grep -rniE 'SERVER_BASE_URL|API_BASE_URL|BuildConfig\.' app/src --include=*.java --include=*.kt \
             2>/dev/null | head -30 || echo "(no reader found)"
 
+      - name: Find the hard-coded base URL the app really uses
+        run: |
+          set -uo pipefail
+          echo "=== every alaadcin.<tld> reference, with context ==="
+          grep -rn 'alaadcin\.' app/src 2>/dev/null | grep -vE 'com\.alaadcin|alaadcin\.user|alaadcin\.driver' | head -30 || echo "(none)"
+          echo ""
+          echo "=== shared-preference and constant files that hold URLs ==="
+          grep -rlniE 'https?://' app/src --include=*.java --include=*.kt 2>/dev/null | head -30
+          echo ""
+          echo "=== URL_BASE / BASE_URL style constants ==="
+          grep -rnE '(URL_BASE|BASE_URL|SERVER_URL|WEB_SERVICE|API_URL)[^A-Za-z]*=' app/src --include=*.java --include=*.kt 2>/dev/null | head -30 || echo "(none)"
+          echo ""
+          echo "=== the class Retrofit/Volley is built with ==="
+          grep -rnE 'new Retrofit|Retrofit\.Builder|baseUrl|WebserviceClient|getRetrofit' app/src --include=*.java --include=*.kt 2>/dev/null | head -20 || echo "(none)"
+
       - name: Report
         run: |
           {
