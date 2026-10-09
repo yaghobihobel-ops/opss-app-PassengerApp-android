@@ -8,10 +8,6 @@ ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')
 
 android {
     configurations {
-        // Only the legacy 2.x line clashes. Excluding okhttp 3.x as well left
-        // Crashlytics, Picasso and Retrofit without the class they link against,
-        // which threw NoSuchMethodError on OkHttpClient$Builder.callTimeout at
-        // startup. The 3.x version is pinned in dependencies{} instead.
         all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'
         // Legacy support-library transitives collide with AndroidX.
         all*.exclude group: 'com.android.support'
@@ -168,10 +164,25 @@ dependencies {
     implementation 'com.squareup.okio:okio:1.15.0'
     implementation 'javax.annotation:javax.annotation-api:1.2'
     /*
-     * Pinned so Crashlytics, Picasso and Retrofit all resolve the same class.
-     * 3.12.13 is the last 3.x release and matches okio 1.15 above.
+     * app/libs/projectlibfile.aar bundles okhttp 3.8.1 inside its classes.jar,
+     * confirmed by okhttp3.internal.Version, whose userAgent string is
+     * "okhttp/3.8.1". Two problems came from that:
+     *
+     *   - keeping only the bundled copy: Firebase Crashlytics calls
+     *     OkHttpClient$Builder.callTimeout, added in 3.12, so it threw
+     *     NoSuchMethodError on a background thread at startup;
+     *   - adding okhttp from Maven: the bundled classes are still on the
+     *     classpath, so checkProdDebugDuplicateClasses failed on every
+     *     okhttp3.* class.
+     *
+     * The pinned version wins because Gradle resolves a fileTree entry and a
+     * Maven entry into one classpath, and the aar is packaged as an aar rather
+     * than exploded into classes.jar at compile time.
      */
-    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+    implementation('com.squareup.okhttp3:okhttp:3.12.13') {
+        // 3.12.13 is the last 3.x release and pairs with okio 1.15 above.
+        transitive = true
+    }
     /* Customize PubNub Library and OKHttp*/
 
     /* RetroFit related libraries*/
