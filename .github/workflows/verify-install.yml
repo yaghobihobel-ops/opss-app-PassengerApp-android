@@ -159,16 +159,8 @@ jobs:
                         # Fetch the APK from the public release. The repository is public, so
                         # no token is needed, and the URL is inlined because a variable set
                         # on an earlier line would be empty here.
-                        echo "release url: $(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" \
-                | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}]
-                         | map(select(.u != null))
-                         | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber))
-                         | last | .u // empty' | head -1)"
-                        curl -sSL -o "$GITHUB_WORKSPACE/apk.apk" "$(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" \
-                | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}]
-                         | map(select(.u != null))
-                         | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber))
-                         | last | .u // empty' | head -1)"
+                        echo "release url: $(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
+                        curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
                         ls -la "$GITHUB_WORKSPACE/apk.apk"
                         test -s "$GITHUB_WORKSPACE/apk.apk" && echo "APK_DOWNLOADED=yes" || { echo "APK_MISSING=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
 
