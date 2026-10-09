@@ -43,16 +43,34 @@ android {
         applicationId "com.alaadcin.user"
         minSdkVersion 17
         targetSdkVersion 31
-        versionCode 73
-        versionName "0.0.38"
+        versionCode 66
+        versionName "0.0.31"
         // Single source of truth for the backend address. Override per build
         // with -PSERVER_BASE_URL=https://host/ on the command line.
         buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "\""
         buildConfigField "String", "API_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "webservice_shark.php\""
         multiDexEnabled true
-        // Real phones use these two; the emulator ABIs are dead weight.
+        /*
+         * Every ABI the project must install on, Android 6 through 14.
+         *
+         * Filtering down to just armeabi-v7a and arm64-v8a was the reason
+         * `adb install` refused the APK with INSTALL_FAILED_NO_MATCHING_ABIS:
+         * Android refuses any package whose native libraries do not include the
+         * device's ABI, and a phone reporting `armeabi` or `x86` had nothing to
+         * load. The vendored aars ship libs for all six folders, so keeping them
+         * all costs disk but makes the package installable everywhere.
+         *
+         *   armeabi      Android 4.4-6 era 32-bit devices
+         *   armeabi-v7a  Android 5-13, the common 32-bit phone ABI
+         *   arm64-v8a    Android 5-14, every modern phone
+         *   x86          emulators and a few tablets
+         *   x86_64       emulators and Chromebooks
+         *
+         * armeabi-v7a and arm64-v8a are the two that real phones use; the rest
+         * exist so no device is told "no matching ABI".
+         */
         ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a'
+            abiFilters 'armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
         }
         vectorDrawables.useSupportLibrary = true
         // would otherwise be packaged as well.
