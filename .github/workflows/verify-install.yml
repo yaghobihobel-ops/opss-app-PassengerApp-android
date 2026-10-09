@@ -159,8 +159,6 @@ jobs:
                         # repository is public, so this needs no token.
                         REPO="${{ github.repository }}"
                         URL=$(gh release view --repo "$REPO" --json assets --jq '.assets[] | select(.name | endswith(".apk")) | .url' 2>/dev/null | head -1)
-                        [ -n "$URL" ] || URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | tr ',' '
-            ' | grep browser_download_url | head -1 | cut -d '"' -f4)
                         echo "release url: ${URL:-none}"
                         APK="$GITHUB_WORKSPACE/apk-for-emulator.apk"
                         [ -n "$URL" ] && curl -sSL -o "$APK" "$URL"
