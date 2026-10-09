@@ -190,7 +190,7 @@ jobs:
                         # `with:` block early, and the download step's output is not visible
                         # there yet, so the script used to receive an empty string. The file
                         # is on this same runner, so look for it instead.
-                        APK=$(find "$GITHUB_WORKSPACE/dist" -name '*.apk' -type f 2>/dev/null | sort | tail -1)
+                        APK=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" /home/runner/work -name 'opss-*.apk' -type f 2>/dev/null | sort | tail -1)
                         echo "APK: ${APK:-<not found>}"
                         test -n "$APK" && test -f "$APK" || { echo "APK_MISSING=1" > install-verdict.txt; exit 1; }
                         echo "APK size: $(du -h "$APK" | cut -f1)"
