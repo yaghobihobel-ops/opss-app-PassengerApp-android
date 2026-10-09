@@ -93,23 +93,33 @@ jobs:
             libxcb-render-util0 libxcb-xfixes0 libxcb-xinerama0 \
             libxkbcommon-x11-0 libnss3 libxss1 libxrandr2 libxi6 \
             libxcursor1 libxdamage1 libxfixes3 libasound2t64 \
-            libqt5gui5 libqt5widgets5 xvfb x11-utils \
+            libqt5gui5 libqt5widgets5 \
             libx11-6 libx11-xcb1 libxext6 libxrender1 libxtst6 \
             || echo "::warning::some emulator packages were unavailable"
-          dpkg -l libqt5gui5 libx11-6 2>/dev/null | grep "^ii" || true
+
+          # xvfb and xdpyinfo live outside that list; install them on their own
+          # so a failure in the list above cannot take the display with it.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11-utils \
+            || echo "::warning::xvfb could not be installed"
+
+          echo "--- what actually landed ---"
+          for p in libqt5gui5 libx11-6 libx11-xcb1 xvfb x11-utils; do
+            dpkg -s "$p" > /dev/null 2>&1 && echo "have $p" || echo "MISSING $p"
+          done
 
           # The emulator is a Qt application and needs a display server. The
           # action starts its own xvfb, but DISPLAY does not always reach the
           # process it launches, so start one here and export it explicitly.
           if ! pgrep -x Xvfb > /dev/null 2>&1; then
             nohup Xvfb :99 -screen 0 1280x800x24 > /tmp/xvfb.log 2>&1 &
-            sleep 3
+            sleep 5
           fi
           if xdpyinfo -display :99 > /dev/null 2>&1; then
             echo "DISPLAY=:99" >> "$GITHUB_ENV"
             echo "xvfb is serving :99"
           else
             echo "::warning::xvfb did not start; the emulator will have no display"
+            tail -20 /tmp/xvfb.log 2>/dev/null || true
           fi
 
       - name: Download the APK from the newest main run
