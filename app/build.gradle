@@ -44,8 +44,8 @@ android {
         applicationId "com.alaadcin.user"
         minSdkVersion 17
         targetSdkVersion 31
-        versionCode 60
-        versionName "0.0.25"
+        versionCode 61
+        versionName "0.0.26"
         // Single source of truth for the backend address. Override per build
         // with -PSERVER_BASE_URL=https://host/ on the command line.
         buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "\""
