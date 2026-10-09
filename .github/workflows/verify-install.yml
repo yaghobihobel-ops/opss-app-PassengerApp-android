@@ -179,93 +179,64 @@ jobs:
           # runner; without this the step fails on the boot timeout alone.
           emulator-boot-timeout: 900
           script: |
-            # This action runs `script` through /usr/bin/sh, which is dash on
-            # Ubuntu. dash has no `set -o pipefail`, so using it here aborted the
-            # script on its first line and nothing ran at all. Keep to options
-            # dash understands.
-            set -u
-            APK="${{ steps.apk.outputs.path }}"
-            echo "APK: $APK"
+            # This action feeds `script` to `/usr/bin/sh` one line at a time, so
+                        # every construct here stays on one line. A multi-line `while` or
+                        # `if` gets truncated to its first line and dash then fails with
+                        # "Syntax error: end of file unexpected (expecting done)".
+                        # It also means `set -o pipefail` is unavailable, so verdicts are
+                        # read from the output text rather than from an exit status.
+                        set -u
+                        APK="${{ steps.apk.outputs.path }}"
+                        echo "APK: $APK"
+                        test -f "$APK" && echo "APK file exists" || { echo "APK file missing at $APK"; exit 1; }
 
-            adb wait-for-device
-            echo "device: $(adb shell getprop ro.build.version.release 2>/dev/null)"
+                        adb wait-for-device
+                        echo "device android=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
 
-            # boot_completed is 1 only once the package manager is actually
-            # serving. Installing before that returns an empty error and no
-            # verdict, which is indistinguishable from a broken APK.
-            echo "waiting for the package manager..."
-            READY=""
-            i=0
-            while [ $i -lt 60 ]; do
-              BOOTED=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')
-              if [ "$BOOTED" = "1" ]; then
-                READY=yes
-                break
-              fi
-              i=$((i + 1))
-              sleep 5
-            done
-            echo "package manager ready: ${READY:-no}"
-            if [ -z "$READY" ]; then
-              echo "NOT_READY=1" > install-verdict.txt
-              exit 1
-            fi
-            adb shell settings put global verifier_verify_adb_installs 0 2>/dev/null || true
+                        # boot_completed is 1 only once the package manager is really serving.
+                        # Installing before that returns an empty error, which is impossible
+                        # to tell apart from a package Android refuses.
+                        echo "waiting for the package manager..."
+                        BOOTED=""; i=0; while [ $i -lt 60 ]; do BOOTED=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]'); [ "$BOOTED" = "1" ] && break; i=$((i + 1)); sleep 5; done
+                        echo "boot_completed=${BOOTED:-empty} after $((i * 5))s"
+                        [ "$BOOTED" = "1" ] || { echo "NOT_READY=1" > install-verdict.txt; exit 1; }
 
-            echo "--- install ---"
-            adb install -r -d "$APK" > install-result.txt 2>&1
-            cat install-result.txt
-            # adb prints exactly "Success" on its own line when the package was
-            # accepted; anything else means Android refused it.
-            if grep -qE '^Success$' install-result.txt; then
-              echo "INSTALL=ok"
-              echo "INSTALL=ok" > install-verdict.txt
-            else
-              echo "INSTALL=failed"
-              echo "INSTALL=failed" > install-verdict.txt
-              exit 1
-            fi
+                        echo "--- install ---"
+                        adb install -r -d "$APK" > install-result.txt 2>&1
+                        cat install-result.txt
+                        grep -qE '^Success$' install-result.txt && echo "INSTALL=ok" > install-verdict.txt || echo "INSTALL=failed" > install-verdict.txt
+                        cat install-verdict.txt
+                        grep -qx "INSTALL=ok" install-verdict.txt || exit 1
 
-            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1)
-            PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-            ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
-            echo "$PKG" > package.txt
-            echo "package=$PKG launchable=${ACT:-<none>}"
+                        AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1)
+                        PKG=$("$AAPT" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+                        ACT=$("$AAPT" dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+                        echo "$PKG" > package.txt
+                        echo "package=$PKG launchable=${ACT:-none}"
 
-            echo "--- is the package really there? ---"
-            adb shell pm list packages | grep -F "$PKG" && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
+                        echo "--- is the package really installed? ---"
+                        adb shell pm list packages 2>/dev/null | grep -F "$PKG" > /dev/null && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
 
-            adb logcat -c
-            if [ -n "${ACT:-}" ]; then
-              adb shell am start -W -n "$PKG/$ACT" 2>&1 | tee launch-result.txt
-            else
-              adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 2>&1 | tee launch-result.txt
-            fi
+                        adb logcat -c
+                        [ -n "$ACT" ] && adb shell am start -W -n "$PKG/$ACT" > launch-result.txt 2>&1 || adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 > launch-result.txt 2>&1
+                        cat launch-result.txt
 
-            sleep 45
+                        sleep 45
 
-            echo "--- process state ---"
-            if adb shell pidof "$PKG" > /dev/null 2>&1; then
-              echo "ALIVE=yes"; echo "$PKG" > /dev/null
-            else
-              echo "ALIVE=no"
-            fi
+                        echo "--- process state ---"
+                        adb shell pidof "$PKG" > /dev/null 2>&1 && echo "ALIVE=yes" || echo "ALIVE=no"
 
-            adb logcat -d > runtime-logcat.txt 2>/dev/null || true
-            adb exec-out screencap -p > runtime-screenshot.png 2>/dev/null || true
-            ls -la runtime-logcat.txt runtime-screenshot.png 2>/dev/null || true
+                        adb logcat -d > runtime-logcat.txt 2>/dev/null
+                        adb exec-out screencap -p > runtime-screenshot.png 2>/dev/null
+                        ls -la runtime-logcat.txt runtime-screenshot.png 2>/dev/null
 
-            echo "--- crashes in this package ---"
-            if grep "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | grep -q "$PKG"; then
-              echo "APP_CRASH=yes"
-              grep -A15 "FATAL EXCEPTION" runtime-logcat.txt | head -40
-            else
-              echo "APP_CRASH=no"
-            fi
+                        echo "--- crashes in this package ---"
+                        grep "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | grep -q "$PKG" && echo "APP_CRASH=yes" || echo "APP_CRASH=no"
+                        grep -A15 "FATAL EXCEPTION" runtime-logcat.txt 2>/dev/null | head -40
 
-            echo "--- network / backend ---"
-            grep -iE "alaadcin|opss|taxi\.ecardo\.ir|UnknownHost|SSL|Firebase|Maps API key|Authorization failure" \
-              runtime-logcat.txt 2>/dev/null | tail -40 || echo "(no matching lines)"
+                        echo "--- backend and network ---"
+                        grep -iE "alaadcin|opss|taxi\.ecardo\.ir|UnknownHost|SSLHandshake|Firebase|Maps API key|Authorization failure" runtime-logcat.txt 2>/dev/null | tail -40
+                        echo "(end of app lines)"
 
       - name: Summarise the real outcome
         if: always()
