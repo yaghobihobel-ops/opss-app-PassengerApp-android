@@ -6,6 +6,11 @@ on:
       - main
       - 'fix/**'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch to build (defaults to the one that owns the workflow)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -25,6 +30,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref_name }}
 
       - name: Set up JDK 17 for the SDK tools
         uses: actions/setup-java@v4
@@ -134,6 +141,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref_name }}
 
       - name: Set up Java for the emulator tooling
         uses: actions/setup-java@v4
