@@ -1,0 +1,61 @@
+name: Scan sources for stale endpoints
+
+# Finds every place the app still points at a domain or host that the opss
+# backend replaced. Runs on GitHub because the search covers the whole tree in
+# one checkout; nothing is downloaded to a workstation.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/src/**'
+      - 'app/build.gradle'
+      - '.github/workflows/scan-sources.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Find stale hosts and the runtime wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Look for every hard-coded host
+        run: |
+          set -uo pipefail
+          echo "=== hosts referenced in sources ==="
+          grep -rhoE '(https?://)?[a-zA-Z0-9.-]+\.(com|net|org|io|ir)[a-zA-Z0-9/_.-]*' \
+            app/src app/build.gradle 2>/dev/null \
+            | sed 's#^https\?://##' | cut -d/ -f1 | sort | uniq -c | sort -rn | head -40
+
+      - name: Show the lines that mention the vendor domain
+        run: |
+          set -uo pipefail
+          grep -rniE 'alaadcin' app/src app/build.gradle 2>/dev/null | head -40 || echo "(no match)"
+
+      - name: Show how the base URL reaches the code
+        run: |
+          set -uo pipefail
+          echo "=== BuildConfig fields ==="
+          grep -nE 'buildConfigField|SERVER_BASE_URL|API_BASE_URL' app/build.gradle | head -20
+          echo ""
+          echo "=== where the app reads them ==="
+          grep -rniE 'SERVER_BASE_URL|API_BASE_URL|BuildConfig\.' app/src --include=*.java --include=*.kt \
+            2>/dev/null | head -30 || echo "(no reader found)"
+
+      - name: Report
+        run: |
+          {
+            echo "### Source scan"
+            echo ""
+            echo "Full host list, the vendor-domain matches and the BuildConfig wiring"
+            echo "are in this step's log above."
+          } >> "$GITHUB_STEP_SUMMARY"
