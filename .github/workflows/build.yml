@@ -100,6 +100,48 @@ jobs:
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
 
+      # app/libs/projectlibfile.aar bundles okhttp 3.8.1 inside its own
+      # classes.jar. An aar from fileTree is unpacked straight onto the
+      # classpath, so a dependency exclude cannot drop those classes and the
+      # pinned okhttp 3.12.13 in build.gradle then fails the duplicate-class
+      # check. The bundled 3.8.1 also predates
+      # OkHttpClient$Builder.callTimeout, which Firebase Crashlytics calls, so
+      # leaving it in place throws NoSuchMethodError at startup.
+      #
+      # Removing okhttp3 from the aar's classes.jar here, in the build job,
+      # leaves exactly one okhttp on the classpath. This edits the workspace
+      # only; nothing is written back to the repository.
+      - name: Drop the okhttp bundled inside the vendored aars
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          for AAR in app/libs/*.aar; do
+            NAME=$(basename "$AAR" .aar)
+            mkdir -p "$WORK/$NAME"
+            unzip -o -q "$AAR" -d "$WORK/$NAME"
+            [ -f "$WORK/$NAME/classes.jar" ] || continue
+
+            COUNT=$(unzip -l "$WORK/$NAME/classes.jar" | grep -c 'okhttp3/' || true)
+            echo "$NAME: $COUNT okhttp3 entries bundled"
+            [ "${COUNT:-0}" -gt 0 ] || continue
+
+            # Rebuild classes.jar from every package except okhttp3.
+            mkdir -p "$WORK/$NAME/x"
+            unzip -o -q "$WORK/$NAME/classes.jar" -d "$WORK/$NAME/x"
+            find "$WORK/$NAME/x" -type d -name okhttp3 -prune -exec rm -rf {} +
+            LEFT=$(find "$WORK/$NAME/x" -name '*.class' | wc -l)
+            echo "$NAME: keeping $LEFT classes, dropping okhttp3"
+
+            rm -f "$WORK/$NAME/classes.jar"
+            (cd "$WORK/$NAME/x" && zip -q -r "../classes.jar" .)
+            # Put the trimmed jar back into the aar.
+            rm -f "$AAR"
+            (cd "$WORK/$NAME" && zip -q -r "$GITHUB_WORKSPACE/$AAR" .)
+          done
+          rm -rf "$WORK"
+          echo "--- libs after ---"
+          ls -la app/libs/
+
       - name: Build prod debug APK
         run: |
           set -euo pipefail
