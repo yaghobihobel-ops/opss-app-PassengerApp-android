@@ -176,10 +176,11 @@ jobs:
           # runner; without this the step fails on the boot timeout alone.
           emulator-boot-timeout: 900
           script: |
-            # Deliberately without `set -e`: the adb server may still be coming
-            # up when this script starts, and one failed adb call must not abort
-            # the whole capture. Each outcome is reported explicitly instead.
-            set -uo pipefail
+            # This action runs `script` through /usr/bin/sh, which is dash on
+            # Ubuntu. dash has no `set -o pipefail`, so using it here aborted the
+            # script on its first line and nothing ran at all. Keep to options
+            # dash understands.
+            set -u
             APK="${{ steps.apk.outputs.path }}"
             echo "APK: $APK"
 
@@ -187,9 +188,11 @@ jobs:
             echo "device: $(adb shell getprop ro.build.version.release 2>/dev/null)"
 
             echo "--- install ---"
-            adb install -r -d "$APK" 2>&1 | tee install-result.txt
-            # Success is "Success"; anything else means the package was refused.
-            if grep -q "Success" install-result.txt; then
+            adb install -r -d "$APK" > install-result.txt 2>&1
+            cat install-result.txt
+            # adb prints exactly "Success" on its own line when the package was
+            # accepted; anything else means Android refused it.
+            if grep -qE '^Success$' install-result.txt; then
               echo "INSTALL=ok"
             else
               echo "INSTALL=failed"
