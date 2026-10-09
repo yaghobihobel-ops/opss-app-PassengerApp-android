@@ -128,14 +128,21 @@ jobs:
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 29
+          # API 30 rather than 29: the API 29 google_apis image fails to reach
+          # sys.boot_completed on current runner images, so nothing downstream
+          # ever runs.
+          api-level: 30
           arch: x86_64
           target: google_apis
           profile: Nexus 6
           disable-animations: true
-          # -no-window makes the emulator exit on runners with no display; the
-          # action already runs it headless through xvfb.
+          # No -no-window: it makes the emulator exit on runners without a
+          # display, and the action already runs it headless under xvfb.
+          # -gpu swiftshader avoids needing a real Vulkan driver.
           emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none -no-metrics
+          # The default 600s is not always enough for a cold image on a busy
+          # runner; without this the step fails on the boot timeout alone.
+          emulator-boot-timeout: 900
           script: |
             # Deliberately without `set -e`: the adb server may still be coming
             # up when this script starts, and one failed adb call must not abort
