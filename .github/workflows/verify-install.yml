@@ -123,6 +123,20 @@ jobs:
             tail -20 /tmp/xvfb.log 2>/dev/null || true
           fi
 
+      - name: Resolve which release to test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # `/releases/latest` is the most recently published release, not the
+          # highest version, so a rebuild landing on an older tag would never be
+          # tested. Pick the highest vN.N.N, comparing the numeric triple because
+          # v0.0.9 sorts after v0.0.10 as a string.
+          URL=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty')
+          echo "testing: ${URL:-none}"
+          [ -n "$URL" ] || { echo "::error::no published APK found"; exit 1; }
+          echo "$URL" > "$GITHUB_WORKSPACE/apk-url.txt"
+
       - name: Install, launch and capture the logs
         id: run
         if: steps.capable.outputs.KVM == 'ready'
@@ -159,8 +173,8 @@ jobs:
                         # Fetch the APK from the public release. The repository is public, so
                         # no token is needed, and the URL is inlined because a variable set
                         # on an earlier line would be empty here.
-                        echo "release url: $(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
-                        curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
+                        echo "release url: $(cat "$GITHUB_WORKSPACE/apk-url.txt")"
+                        curl -sSL -o "$GITHUB_WORKSPACE/apk.apk" "$(cat "$GITHUB_WORKSPACE/apk-url.txt")"
                         ls -la "$GITHUB_WORKSPACE/apk.apk"
                         test -s "$GITHUB_WORKSPACE/apk.apk" && echo "APK_DOWNLOADED=yes" || { echo "APK_MISSING=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
 
