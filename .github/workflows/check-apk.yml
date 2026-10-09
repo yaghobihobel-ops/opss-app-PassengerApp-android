@@ -29,10 +29,12 @@ jobs:
           ref: ${{ github.ref_name }}
 
       - name: Download the published APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
           mkdir -p dist
-          URL=$(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
+          URL=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
           echo "url: ${URL:-none}"
           [ -n "$URL" ] && curl -sSL -o dist/app.apk "$URL"
           ls -la dist/
