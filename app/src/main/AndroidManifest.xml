@@ -133,6 +133,21 @@
             <!-- </intent-filter> -->
         </receiver>
 
+        <!--
+             The vendored Sinch SDK declares this service with an intent-filter
+             and no android:exported. Android 12+ refuses to install the whole
+             package because of it (INSTALL_PARSE_FAILED_MANIFEST_MALFORMED),
+             and the component lives in an .aar we cannot edit. Declaring it
+             here, with the attribute the platform requires, lets the manifest
+             merger apply the fix to the merged result.
+        -->
+        <service
+            android:name="com.sinch.android.rtc.internal.client.fcm.InstanceIDTokenService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <service android:name="com.alaadcin.user.MyFirebaseMessagingService"
             android:exported="true">
             <intent-filter>
