@@ -25,17 +25,15 @@ jobs:
       - name: Mirror the pipeline onto this branch
         run: |
           set -euo pipefail
-          BRANCH="${{ inputs.branch }}"
 
           # Take the pipeline definition from the branch that owns the workflow,
           # so both stay in step without a second source of truth.
           git fetch origin main --quiet
-          if git cat-file -e origin/main:.github/workflows/build.yml 2>/dev/null; then
-            cp origin/main/.github/workflows/build.yml .github/workflows/build.yml
-            echo "build.yml synced from main"
-          else
-            echo "main has no build.yml to copy"
-          fi
+          git show origin/main:.github/workflows/build.yml > /tmp/build.yml || {
+            echo "main has no build.yml to copy"; exit 1; }
+          cp /tmp/build.yml .github/workflows/build.yml
+          chmod +x .github/workflows/build.yml 2>/dev/null || true
+          echo "build.yml synced from main ($(wc -l < /tmp/build.yml) lines)"
 
           echo "--- build.yml head ---"
           head -20 .github/workflows/build.yml
