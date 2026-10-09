@@ -2,6 +2,11 @@ name: Install CI And Clean Up
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to install onto'
+        required: false
+        default: 'fix/stable'
 
 permissions:
   contents: write
@@ -9,16 +14,38 @@ permissions:
 jobs:
   install:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout the working branch
         uses: actions/checkout@v4
         with:
-          ref: fix/stable
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Mirror the pipeline onto this branch
+        run: |
+          set -euo pipefail
+          BRANCH="${{ inputs.branch }}"
+
+          # Take the pipeline definition from the branch that owns the workflow,
+          # so both stay in step without a second source of truth.
+          git fetch origin main --quiet
+          if git cat-file -e origin/main:.github/workflows/build.yml 2>/dev/null; then
+            cp origin/main/.github/workflows/build.yml .github/workflows/build.yml
+            echo "build.yml synced from main"
+          else
+            echo "main has no build.yml to copy"
+          fi
+
+          echo "--- build.yml head ---"
+          head -20 .github/workflows/build.yml
 
       - name: Remove the one-shot fix workflows
         run: |
           set -euo pipefail
-          for f in prepare-project.yml fix-signing-path.yml fix-manifest.yml fix-ndk.yml fix-signing-path.yml; do
+          for f in prepare-project.yml fix-signing-path.yml fix-manifest.yml \
+                   fix-ndk.yml restore-wrapper.yml harden-gradle.yml \
+                   diagnose-driver.yml transfer-release.yml; do
             if [ -f ".github/workflows/$f" ]; then
               git rm -q ".github/workflows/$f" && echo "removed $f"
             fi
@@ -33,22 +60,18 @@ jobs:
           import pathlib, re
           p = pathlib.Path("gradle.properties")
           lines = p.read_text(encoding="utf-8").splitlines()
-
-          seen = set()
-          out = []
+          seen, out = set(), []
           for line in lines:
               m = re.match(r"^\s*([A-Za-z][\w.\-]*)\s*=", line)
               if m:
-                  key = m.group(1)
-                  if key in seen:
+                  if m.group(1) in seen:
                       continue
-                  seen.add(key)
+                  seen.add(m.group(1))
               out.append(line)
-
           p.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
           print("de-duplicated")
           PY
-          grep -vE "^\s*#|^\s*$" gradle.properties
+          grep -vE "^\s*#|^\s*$" gradle.properties || true
 
       - name: Commit
         run: |
@@ -56,5 +79,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "ci: drop one-shot fix workflows and de-duplicate gradle.properties"
-          git push origin HEAD:fix/stable
+          git diff --cached --quiet || git commit -m "ci: install the staged build, smoke-test and release pipeline"
+          BRANCH="${{ inputs.branch }}"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$BRANCH" 2>/dev/null; then
+              echo "pushed to $BRANCH"; break
+            fi
+            git pull --rebase --autostash origin "$BRANCH"
+            [ "$attempt" = "3" ] && echo "::warning::push did not land"
+          done
