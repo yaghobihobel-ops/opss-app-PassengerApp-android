@@ -134,6 +134,7 @@
         </receiver>
 
         <service android:name="com.alaadcin.user.MyFirebaseMessagingService">
+            android:exported="true"
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
                 <action android:name="com.google.firebase.INSTANCE_ID_EVENT" />
@@ -173,6 +174,7 @@
         <activity
             android:name="com.alaadcin.user.LauncherActivity"
             android:screenOrientation="portrait">
+            android:exported="true"
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
@@ -343,6 +345,7 @@
             android:name="com.braintreepayments.api.BraintreeBrowserSwitchActivity"
             android:launchMode="singleTask"
             android:screenOrientation="portrait">
+            android:exported="true"
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 
