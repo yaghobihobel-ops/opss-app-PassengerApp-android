@@ -26,7 +26,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 11
+      - name: Set up JDK 17 for the SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          # sdkmanager is compiled for Java 17, so it must not run under the
+          # JDK 11 that Gradle needs.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
+          if [ -n "${NDK:-}" ]; then
+            echo "Installing ndk;$NDK"
+            for attempt in 1 2 3; do
+              yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" 2>&1 | tail -3 || true
+              if [ -d "$ANDROID_HOME/ndk/$NDK" ]; then
+                echo "NDK $NDK installed"; break
+              fi
+              echo "install attempt $attempt failed"
+              sleep 10
+            done
+          fi
+
+          echo "NDK present:"; ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
+          if [ -n "${NDK:-}" ] && [ ! -d "$ANDROID_HOME/ndk/$NDK" ]; then
+            echo "::error::NDK $NDK could not be installed; image ships: $(ls "$ANDROID_HOME/ndk" 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
+
+      - name: Set up JDK 11 for Gradle
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -34,23 +66,6 @@ jobs:
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
-
-      - name: Install Android SDK components
-        run: |
-          set -euo pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          NDK=$(grep -oP "ndkVersion\s+'\K[^']+" app/build.gradle | head -1 || true)
-          if [ -n "${NDK:-}" ]; then
-            echo "Installing ndk;$NDK"
-            for attempt in 1 2 3; do
-              if yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" 2>&1 | tail -2; then
-                break
-              fi
-              echo "install attempt $attempt failed"
-              sleep 10
-            done
-          fi
-          echo "NDK present:"; ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
 
       - name: Build prod debug APK
         run: ./gradlew assembleProdDebug --no-daemon --stacktrace
@@ -114,11 +129,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 11
+      - name: Set up Java for the emulator tooling
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '11'
+          java-version: '17'
 
       - name: Download the APK from the build job
         uses: actions/download-artifact@v4
@@ -196,6 +211,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Set up Java for the release tooling
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Bump the patch version
         id: bump
