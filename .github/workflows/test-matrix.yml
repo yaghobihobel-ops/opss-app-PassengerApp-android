@@ -208,7 +208,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: matrix-apk
-          path: dist
+          path: fetched
+          merge-multiple: true
+
+      - name: Put the APK where the emulator step expects it
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          find fetched -name '*.apk' | head -5
+          APK=$(find fetched -name '*.apk' | head -1)
+          [ -n "$APK" ] || { echo "::error::no APK in the artifact"; exit 1; }
+          cp "$APK" dist/app.apk
+          ls -la dist/
+          # State the path the next step will use, because the emulator action
+          # cannot read a job output.
+          echo "$GITHUB_WORKSPACE/dist/app.apk" > dist/apk-path.txt
 
       - name: Boot Android ${{ matrix.name }} and install
         id: run
@@ -231,6 +245,7 @@ jobs:
             echo "boot_completed=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')"
 
             echo "--- install attempt ---"
+            ls -la "$GITHUB_WORKSPACE/dist/"
             adb install -r -d "$GITHUB_WORKSPACE/dist/app.apk" > "$GITHUB_WORKSPACE/install.txt" 2>&1
             cat "$GITHUB_WORKSPACE/install.txt"
             grep -qE '^Success$' "$GITHUB_WORKSPACE/install.txt" && echo "INSTALL=ok" > "$GITHUB_WORKSPACE/verdict.txt" || echo "INSTALL=failed" > "$GITHUB_WORKSPACE/verdict.txt"
