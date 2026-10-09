@@ -1,12 +1,13 @@
 name: Verify install on a real device image
 
-# This workflow proves the two things that a build log alone cannot:
-#   1. the published APK really installs (Android refuses to parse an
-#      unsigned or truncated package)
+# This workflow proves the two things a build log alone cannot:
+#   1. the published APK really installs — Android refuses to parse an unsigned
+#      or truncated package, which is exactly the install failure we hit
 #   2. the app process really starts and stays up
 #
-# It is deliberately separate from build.yml: the emulator needs KVM and extra
-# packages, and a KVM-less runner must not be able to fail the release build.
+# It is separate from build.yml on purpose: the emulator needs KVM, an X
+# display and a Qt/GL stack that the build runner does not need. A runner that
+# cannot host an emulator must be reported as "not verified", never as a pass.
 
 on:
   workflow_dispatch:
@@ -60,7 +61,7 @@ jobs:
         run: |
           set -uo pipefail
           # Nested virtualisation is not always available. Decide once, up front,
-          # so the steps below can skip cleanly instead of failing halfway.
+          # so the steps below skip cleanly instead of failing halfway.
           if [ ! -e /dev/kvm ]; then
             echo "KVM=absent" >> "$GITHUB_OUTPUT"
             echo "::warning::no /dev/kvm on this runner; the emulator cannot run here"
@@ -83,9 +84,9 @@ jobs:
         run: |
           set -uo pipefail
           # The image does not ship the Qt/GL/X11 stack the emulator links
-          # against. Without it the emulator dies at startup with "no Qt
-          # platform plugin could be initialized" or "Could not open libX11.so",
-          # and nothing downstream can ever run.
+          # against. Without it the emulator dies at startup with "no Qt platform
+          # plugin could be initialized" or "Could not open libX11.so", and
+          # nothing downstream can ever run.
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             libpulse0 libgl1-mesa-dri libglx-mesa0 libxcb-cursor0 \
@@ -97,13 +98,13 @@ jobs:
             libx11-6 libx11-xcb1 libxext6 libxrender1 libxtst6 \
             || echo "::warning::some emulator packages were unavailable"
 
-          # xvfb and xdpyinfo live outside that list; install them on their own
-          # so a failure in the list above cannot take the display with it.
+          # xvfb and xdpyinfo sit outside that list; install them on their own
+          # so a failure above cannot take the display with it.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11-utils \
             || echo "::warning::xvfb could not be installed"
 
           echo "--- what actually landed ---"
-          for p in libqt5gui5 libx11-6 libx11-xcb1 xvfb x11-utils; do
+          for p in libqt5gui5 libx11-6 xvfb x11-utils; do
             dpkg -s "$p" > /dev/null 2>&1 && echo "have $p" || echo "MISSING $p"
           done
 
@@ -122,66 +123,14 @@ jobs:
             tail -20 /tmp/xvfb.log 2>/dev/null || true
           fi
 
-      - name: Download the APK from the newest main run
-        id: apk
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          mkdir -p dist
-          RUN=$(gh run list --repo "${{ github.repository }}" --workflow build.yml \
-                  --branch main --status success --limit 1 --json databaseId \
-                  --jq '.[0].databaseId' 2>/dev/null || true)
-          echo "using build run: ${RUN:-none}"
-          if [ -z "$RUN" ]; then
-            echo "available=no" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          for attempt in 1 2 3; do
-            if gh run download "$RUN" -D dist --pattern "opss-*-*" 2>/dev/null; then
-              break
-            fi
-            echo "download attempt $attempt failed"
-            sleep 15
-          done
-          APK=$(find dist -name '*.apk' | head -1)
-          if [ -z "$APK" ]; then
-            echo "available=no" >> "$GITHUB_OUTPUT"
-            echo "::warning::no APK artifact found on run $RUN"
-            exit 0
-          fi
-          ABS=$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")
-          echo "APK: $ABS ($(du -h "$APK" | cut -f1))"
-          echo "available=yes" >> "$GITHUB_OUTPUT"
-          # The emulator action runs `script` from a different working directory,
-          # so the script needs an absolute path, not the relative one found here.
-          echo "path=$ABS" >> "$GITHUB_OUTPUT"
-
-      - name: Publish the APK for the emulator step
-        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-for-emulator
-          path: dist/
-          retention-days: 1
-          if-no-files-found: error
-
-      - name: Restore the APK next to the emulator step
-        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
-        uses: actions/download-artifact@v4
-        with:
-          name: apk-for-emulator
-          path: dist
-
       - name: Install, launch and capture the logs
         id: run
-        if: steps.capable.outputs.KVM == 'ready' && steps.apk.outputs.available == 'yes'
+        if: steps.capable.outputs.KVM == 'ready'
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # API 30 rather than 29: the API 29 google_apis image fails to reach
-          # sys.boot_completed on current runner images, so nothing downstream
-          # ever runs.
+          # sys.boot_completed on current runner images.
           api-level: 30
           arch: x86_64
           target: google_apis
@@ -189,7 +138,7 @@ jobs:
           disable-animations: true
           # No -no-window: it makes the emulator exit on runners without a
           # display, and the action already runs it headless under xvfb.
-          # -gpu swiftshader avoids needing a real Vulkan driver.
+          # -gpu swiftshader is the software renderer current builds support.
           emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader -camera-back none -no-metrics
           # The default 600s is not always enough for a cold image on a busy
           # runner; without this the step fails on the boot timeout alone.
@@ -202,14 +151,19 @@ jobs:
                         # It also means `set -o pipefail` is unavailable, so verdicts are
                         # read from the output text rather than from an exit status.
                         set -u
-                        # Do not receive the path as an expression: the action evaluates its
-                        # `with:` block early, and the download step's output is not visible
-                        # there yet, so the script used to receive an empty string. The file
-                        # is on this same runner, so look for it instead.
-                        APK=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" /home/runner/work "$HOME" /tmp -name '*.apk' -type f 2>/dev/null | sort | tail -1)
-                        echo "APK: ${APK:-<not found>}"
-                        test -n "$APK" && test -f "$APK" || { echo "APK_MISSING=1" > install-verdict.txt; exit 1; }
-                        echo "APK size: $(du -h "$APK" | cut -f1)"
+
+                        # Fetch the APK from the public release rather than receiving a path.
+                        # The emulator action evaluates its `with:` block before this job's
+                        # step outputs exist, and it runs `script` from a working directory
+                        # where a file staged in an earlier step is not visible. The
+                        # repository is public, so this needs no token.
+                        REPO="${{ github.repository }}"
+                        URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"browser_download_url": *"[^"]*apk"' | head -1 | sed 's/.*: *"//; s/"$//')
+                        echo "release url: ${URL:-none}"
+                        APK="$GITHUB_WORKSPACE/apk-for-emulator.apk"
+                        [ -n "$URL" ] && curl -sSL -o "$APK" "$URL"
+                        echo "APK: ${APK:-none}"
+                        test -s "$APK" && echo "APK size: $(du -h "$APK" | cut -f1)" || { echo "APK_MISSING=1" > install-verdict.txt; exit 1; }
 
                         adb wait-for-device
                         echo "device android=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
@@ -269,14 +223,12 @@ jobs:
           done
 
           KVM="${{ steps.capable.outputs.KVM }}"
-          FOUND="${{ steps.apk.outputs.available }}"
           OUTCOME="${{ steps.run.outcome }}"
 
           {
             echo "### Install verification"
             echo ""
             echo "- KVM on this runner: \`${KVM:-not checked}\`"
-            echo "- APK artifact found: \`${FOUND:-no}\`"
             echo "- Emulator step outcome: \`${OUTCOME:-not run}\`"
             echo ""
             echo "### Install output"
@@ -286,8 +238,8 @@ jobs:
             echo '```'
             echo ""
             if grep -qx "INSTALL=ok" logs/install-verdict.txt 2>/dev/null; then
-              echo "**The package installed.** Android accepted the APK, which is the thing"
-              echo "that was failing with \`there was a problem while parsing the package\`."
+              echo "**The package installed.** Android accepted the APK, which is the"
+              echo "thing that was failing with \`there was a problem while parsing the package\`."
             else
               echo "**NOT VERIFIED**: there is no \`INSTALL=ok\` verdict in this run, so the"
               echo "package was never observed installing."
