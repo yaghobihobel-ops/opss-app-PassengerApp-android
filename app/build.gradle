@@ -8,8 +8,11 @@ ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')
 
 android {
     configurations {
+        // Only the legacy 2.x line clashes. Excluding okhttp 3.x as well left
+        // Crashlytics, Picasso and Retrofit without the class they link against,
+        // which threw NoSuchMethodError on OkHttpClient$Builder.callTimeout at
+        // startup. The 3.x version is pinned in dependencies{} instead.
         all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'
-        all*.exclude group: 'com.squareup.okhttp3', module: 'okhttp'
         // Legacy support-library transitives collide with AndroidX.
         all*.exclude group: 'com.android.support'
     }
@@ -44,8 +47,8 @@ android {
         applicationId "com.alaadcin.user"
         minSdkVersion 17
         targetSdkVersion 31
-        versionCode 46
-        versionName "0.0.11"
+        versionCode 66
+        versionName "0.0.31"
         // Single source of truth for the backend address. Override per build
         // with -PSERVER_BASE_URL=https://host/ on the command line.
         buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "\""
@@ -164,6 +167,11 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.8.5'
     implementation 'com.squareup.okio:okio:1.15.0'
     implementation 'javax.annotation:javax.annotation-api:1.2'
+    /*
+     * Pinned so Crashlytics, Picasso and Retrofit all resolve the same class.
+     * 3.12.13 is the last 3.x release and matches okio 1.15 above.
+     */
+    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
     /* Customize PubNub Library and OKHttp*/
 
     /* RetroFit related libraries*/
