@@ -68,7 +68,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build prod debug APK
-        run: ./gradlew assembleProdDebug --no-daemon --stacktrace
+        run: |
+          set -euo pipefail
+          # The vendor zip lost the executable bit on gradlew.
+          chmod +x gradlew
+          ./gradlew assembleProdDebug --no-daemon --stacktrace
 
       - name: Collect APK and read its badging
         id: apk
