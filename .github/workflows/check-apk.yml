@@ -1,0 +1,97 @@
+name: Check the APK manifest
+
+# The install kept failing with INSTALL_PARSE_FAILED_MANIFEST_MALFORMED naming
+# com.alaadcin.user.MyFirebaseMessagingService, even though the source manifest
+# declares android:exported on it. This job reads the *built* APK and reports
+# what is actually inside it, so the next decision is based on the binary rather
+# than on the source file.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/src/main/AndroidManifest.xml'
+      - '.github/workflows/check-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Report the built manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download the published APK
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          URL=$(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+                | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
+          echo "url: ${URL:-none}"
+          [ -n "$URL" ] && curl -sSL -o dist/app.apk "$URL"
+          ls -la dist/
+          test -s dist/app.apk || { echo "::error::no APK"; exit 1; }
+          sha256sum dist/app.apk | tee dist/app.apk.sha256
+
+      - name: Read every component and its exported flag
+        run: |
+          set -uo pipefail
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -1)
+          "$AAPT" dump xmltree dist/app.apk --file AndroidManifest.xml > dist/manifest-tree.txt 2>&1
+
+          # Print each service/activity/receiver together with its exported value,
+          # so a missing attribute is visible next to the component that needs it.
+          awk '
+            /E: (service|activity|receiver|provider) / { comp = $0; exported = "NOT-SET"; next }
+            /android:exported/ { exported = $0; print comp; print "    " exported; next }
+          ' dist/manifest-tree.txt > dist/components.txt
+
+          echo "--- components that declare an intent-filter ---"
+          awk '
+            /E: (service|activity|receiver|provider) / { keep = 0; comp = $0; next }
+            /E: intent-filter / { keep = 1; print comp; next }
+          ' dist/manifest-tree.txt | head -20
+
+          echo ""
+          echo "--- the Firebase messaging service specifically ---"
+          grep -B2 -A12 "MyFirebaseMessagingService" dist/manifest-tree.txt | head -30
+
+          echo ""
+          echo "--- exported attributes present in the binary ---"
+          grep -c "android:exported" dist/manifest-tree.txt || echo 0
+
+      - name: Put the report in the summary
+        run: |
+          {
+            echo "### Built APK manifest"
+            echo ""
+            echo "APK sha256: \`$(cat dist/app.apk.sha256 | cut -d' ' -f1)\`"
+            echo ""
+            echo "#### components with an intent-filter"
+            echo '```'
+            awk '/E: (service|activity|receiver|provider) /{c=$0} /E: intent-filter/{print c}' dist/manifest-tree.txt
+            echo '```'
+            echo ""
+            echo "#### MyFirebaseMessagingService"
+            echo '```'
+            grep -A12 "MyFirebaseMessagingService" dist/manifest-tree.txt | head -14
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-manifest-report
+          path: |
+            dist/manifest-tree.txt
+            dist/components.txt
+          retention-days: 30
+          if-no-files-found: warn
