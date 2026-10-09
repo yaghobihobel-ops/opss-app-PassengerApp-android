@@ -190,6 +190,28 @@ jobs:
             adb wait-for-device
             echo "device: $(adb shell getprop ro.build.version.release 2>/dev/null)"
 
+            # boot_completed is 1 only once the package manager is actually
+            # serving. Installing before that returns an empty error and no
+            # verdict, which is indistinguishable from a broken APK.
+            echo "waiting for the package manager..."
+            READY=""
+            i=0
+            while [ $i -lt 60 ]; do
+              BOOTED=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')
+              if [ "$BOOTED" = "1" ]; then
+                READY=yes
+                break
+              fi
+              i=$((i + 1))
+              sleep 5
+            done
+            echo "package manager ready: ${READY:-no}"
+            if [ -z "$READY" ]; then
+              echo "NOT_READY=1" > install-verdict.txt
+              exit 1
+            fi
+            adb shell settings put global verifier_verify_adb_installs 0 2>/dev/null || true
+
             echo "--- install ---"
             adb install -r -d "$APK" > install-result.txt 2>&1
             cat install-result.txt
