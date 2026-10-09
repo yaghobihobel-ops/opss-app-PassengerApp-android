@@ -65,7 +65,6 @@ android {
         renderscriptTargetApi 28
         renderscriptSupportModeEnabled true
     ndkVersion '22.0.7026061'
-        signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
     }
     flavorDimensions "default"
     dexOptions {
@@ -88,22 +87,22 @@ android {
     }
     buildTypes {
         release {
+            signingConfig releaseKeystoreFile != null ? signingConfigs.config : signingConfigs.debug
             debuggable false
             buildConfigField "String", "USER_TYPE", "\"Passenger\""
             buildConfigField "String", "USER_ID_KEY", "\"iUserId\""
             minifyEnabled true
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
         }
         debug {
+            signingConfig signingConfigs.debug
             debuggable true
             buildConfigField "String", "USER_TYPE", "\"Passenger\""
             buildConfigField "String", "USER_ID_KEY", "\"iUserId\""
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig releaseKeystoreFile != null ? signingConfigs.config : null
         }
     }
     packagingOptions {
