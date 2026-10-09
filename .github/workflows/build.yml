@@ -306,8 +306,17 @@ jobs:
 
           NAME="opss-${{ vars.APP_SLUG || 'passenger' }}-$VERSION.apk"
 
+          # A debug build is signed with the throwaway Android debug key, so it
+          # will not install over an existing build signed with the vendor key.
+          # Document that on the release page instead of failing silently.
           {
             echo "**Version $VERSION** (versionCode ${{ steps.bump.outputs.code }})"
+            echo ""
+            echo "> **Install note:** this is a *debug* build, signed with the standard"
+            echo "> Android debug key. If it will not install on your phone, uninstall the"
+            echo "> previously installed copy first — Android refuses to replace an app"
+            echo "> signed with a different key. Debug builds also report to a placeholder"
+            echo "> Firebase project, so login and push will not work yet."
             echo ""
             echo "### What changed and why"
             echo ""
