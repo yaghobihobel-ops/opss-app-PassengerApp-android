@@ -150,9 +150,12 @@ jobs:
             echo "::warning::no APK artifact found on run $RUN"
             exit 0
           fi
-          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+          ABS=$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")
+          echo "APK: $ABS ($(du -h "$APK" | cut -f1))"
           echo "available=yes" >> "$GITHUB_OUTPUT"
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          # The emulator action runs `script` from a different working directory,
+          # so the script needs an absolute path, not the relative one found here.
+          echo "path=$ABS" >> "$GITHUB_OUTPUT"
 
       - name: Install, launch and capture the logs
         id: run
@@ -194,8 +197,10 @@ jobs:
             # accepted; anything else means Android refused it.
             if grep -qE '^Success$' install-result.txt; then
               echo "INSTALL=ok"
+              echo "INSTALL=ok" > install-verdict.txt
             else
               echo "INSTALL=failed"
+              echo "INSTALL=failed" > install-verdict.txt
               exit 1
             fi
 
@@ -245,28 +250,39 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p logs
-          for f in runtime-logcat.txt install-result.txt launch-result.txt package.txt runtime-screenshot.png; do
+          for f in runtime-logcat.txt install-result.txt install-verdict.txt launch-result.txt package.txt runtime-screenshot.png; do
             cp -f "$f" logs/ 2>/dev/null || true
           done
+
+          KVM="${{ steps.capable.outputs.KVM }}"
+          FOUND="${{ steps.apk.outputs.available }}"
+          OUTCOME="${{ steps.run.outcome }}"
 
           {
             echo "### Install verification"
             echo ""
-            echo "- KVM: \`${{ steps.capable.outputs.KVM || 'unknown' }}\`"
-            echo "- APK found: \`${{ steps.apk.outputs.available || 'no' }}\`"
-            echo "- Emulator step outcome: \`${{ steps.run.outcome || 'not-run' }}\`"
+            echo "- KVM on this runner: \`${KVM:-not checked}\`"
+            echo "- APK artifact found: \`${FOUND:-no}\`"
+            echo "- Emulator step outcome: \`${OUTCOME:-not run}\`"
             echo ""
             echo "### Install output"
             echo ""
             echo '```'
-            head -5 logs/install-result.txt 2>/dev/null || echo "(no install output captured)"
+            cat logs/install-result.txt 2>/dev/null || echo "(no install output was captured)"
             echo '```'
+            echo ""
+            if grep -qx "INSTALL=ok" logs/install-verdict.txt 2>/dev/null; then
+              echo "**The package installed.** Android accepted the APK, which is the thing"
+              echo "that was failing with \`there was a problem while parsing the package\`."
+            else
+              echo "**NOT VERIFIED**: there is no \`INSTALL=ok\` verdict in this run, so the"
+              echo "package was never observed installing."
+            fi
             echo ""
             if [ -s logs/runtime-screenshot.png ]; then
               echo "A screenshot of the running app is attached as an artifact."
             else
-              echo "**NOT VERIFIED**: the emulator did not produce a screenshot, so the app was"
-              echo "never observed running. This runner could not host an emulator."
+              echo "No screenshot was captured, so the app was never observed running."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
