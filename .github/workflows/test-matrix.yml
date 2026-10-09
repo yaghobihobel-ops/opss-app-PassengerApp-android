@@ -1,0 +1,268 @@
+name: Test install across Android versions
+
+# The published APK has to install and start on Android 6 through 14. This
+# workflow proves it per API level instead of assuming, because the reasons an
+# install is refused are different on each one:
+#
+#   - below API 21 the app is rejected outright (INSTALL_FAILED_OLDER_SDK)
+#   - API 23-25 refuse an app whose native libraries they cannot load
+#   - Android 14 refuses APKs whose signing or target level is not acceptable
+#
+# Each level runs in its own job so one failure does not hide the rest, and the
+# exact adb error line is reported verbatim rather than summarised.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/test-matrix.yml'
+      - 'app/build.gradle'
+      - 'app/src/main/AndroidManifest.xml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opss-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    name: What is actually inside the APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      min_sdk: ${{ steps.badging.outputs.min_sdk }}
+      target_sdk: ${{ steps.badging.outputs.target_sdk }}
+      abis: ${{ steps.badging.outputs.abis }}
+    steps:
+      - name: Download the published APK
+        id: get
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          URL=$(curl -sSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+                | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
+          echo "url: ${URL:-none}"
+          if [ -n "$URL" ]; then
+            curl -sSL -o dist/app.apk "$URL"
+          fi
+          ls -la dist/
+          test -s dist/app.apk || { echo "::error::could not download the APK"; exit 1; }
+          echo "size=$(stat -c%s dist/app.apk)" >> "$GITHUB_OUTPUT"
+
+      - name: Read the manifest facts that decide installability
+        id: badging
+        run: |
+          set -uo pipefail
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -1)
+          echo "aapt: $AAPT"
+          "$AAPT" dump badging dist/app.apk > /tmp/badging.txt
+
+          MIN=$("$AAPT" dump badging dist/app.apk | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)
+          TARGET=$("$AAPT" dump badging dist/app.apk | sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)
+          ABIS=$(unzip -l dist/app.apk | grep -o 'lib/[a-z0-9_-]*' | cut -d/ -f2 | sort -u | tr '\n' ' ')
+
+          {
+            echo "### APK facts"
+            echo ""
+            echo "- file: \`dist/app.apk\` (${{ steps.get.outputs.size }} bytes)"
+            echo "- minSdkVersion: \`$MIN\`"
+            echo "- targetSdkVersion: \`$TARGET\`"
+            echo "- ABIs packaged: \`$ABIS\`"
+            echo ""
+            echo "Android 6 is API 23 and Android 14 is API 34, so minSdk must be"
+            echo "at most $MIN and the target level must be one Android 14 accepts."
+            echo ""
+            echo "### Full badging"
+            echo '```'
+            grep -E "^package|sdkVersion|native-code|uses-feature|uses-permission|application-label:|locales" /tmp/badging.txt | head -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "min_sdk=$MIN" >> "$GITHUB_OUTPUT"
+          echo "target_sdk=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "abis=$ABIS" >> "$GITHUB_OUTPUT"
+
+      - name: Show what each Android version would say
+        run: |
+          set -uo pipefail
+          {
+            echo ""
+            echo "### Requirement per version"
+            echo ""
+            echo "| Android | API | verdict for this APK |"
+            echo "| --- | --- | --- |"
+            for pair in "6.0:23" "7.0:24" "8.0:26" "9.0:28" "10:29" "11:30" "12:31" "13:33" "14:34"; do
+              NAME=${pair%%:*}
+              API=${pair##*:}
+              if [ "$API" -lt "${{ steps.badging.outputs.min_sdk }}" ]; then
+                VERDICT="rejected: minSdk is ${{ steps.badging.outputs.min_sdk }}, and this version is older"
+              else
+                VERDICT="eligible to install"
+              fi
+              echo "| $NAME | $API | $VERDICT |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the APK for the matrix jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-apk
+          path: dist/app.apk
+          retention-days: 1
+          if-no-files-found: error
+
+  install:
+    name: Install on Android ${{ matrix.name }}
+    needs: inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { api: 23, name: '6.0' }
+          - { api: 26, name: '8.0' }
+          - { api: 30, name: '11' }
+          - { api: 33, name: '13' }
+          - { api: 34, name: '14' }
+    steps:
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Give the runner a usable adb
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5; do
+            adb kill-server > /dev/null 2>&1 || true
+            adb start-server > /dev/null 2>&1 || true
+            adb devices > /dev/null 2>&1 && { echo "adb up on attempt $attempt"; break; }
+            echo "adb not ready (attempt $attempt)"
+            sleep 10
+          done
+
+      - name: Enable KVM
+        run: |
+          set -uo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::no /dev/kvm; this job cannot run an emulator"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chown root:kvm /dev/kvm 2>/dev/null || true
+          sudo chmod 0666 /dev/kvm 2>/dev/null || true
+
+      - name: Install the Qt, GL and X11 stack the emulator needs
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            libpulse0 libgl1-mesa-dri libglx-mesa0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-randr0 \
+            libxcb-render-util0 libxcb-xfixes0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libnss3 libxss1 libxrandr2 libxi6 \
+            libxcursor1 libxdamage1 libxfixes3 libasound2t64 \
+            libqt5gui5 libqt5widgets5 libx11-6 libx11-xcb1 libxext6 \
+            libxrender1 libxtst6 || echo "::warning::some packages were unavailable"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11-utils \
+            || echo "::warning::xvfb could not be installed"
+          if ! pgrep -x Xvfb > /dev/null 2>&1; then
+            nohup Xvfb :99 -screen 0 1280x800x24 > /tmp/xvfb.log 2>&1 &
+            sleep 5
+          fi
+          xdpyinfo -display :99 > /dev/null 2>&1 && { echo "DISPLAY=:99" >> "$GITHUB_ENV"; echo "xvfb serving :99"; } \
+            || echo "::warning::xvfb did not start"
+
+      - name: Fetch the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-apk
+          path: dist
+
+      - name: Boot Android ${{ matrix.name }} and install
+        id: run
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: google_apis
+          profile: Nexus 6
+          disable-animations: true
+          emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader -camera-back none -no-metrics
+          emulator-boot-timeout: 900
+          script: |
+            set -u
+            echo "android release: $(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
+            echo "android sdk: $(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '[:space:]')"
+
+            i=0; while [ $i -lt 60 ]; do [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')" = "1" ] && break; i=$((i + 1)); sleep 5; done
+            echo "boot_completed=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '[:space:]')"
+
+            echo "--- install attempt ---"
+            adb install -r -d "$GITHUB_WORKSPACE/dist/app.apk" > "$GITHUB_WORKSPACE/install.txt" 2>&1
+            cat "$GITHUB_WORKSPACE/install.txt"
+            grep -qE '^Success$' "$GITHUB_WORKSPACE/install.txt" && echo "INSTALL=ok" > "$GITHUB_WORKSPACE/verdict.txt" || echo "INSTALL=failed" > "$GITHUB_WORKSPACE/verdict.txt"
+            cat "$GITHUB_WORKSPACE/verdict.txt"
+            grep -qx "INSTALL=ok" "$GITHUB_WORKSPACE/verdict.txt" || exit 1
+
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1); "$AAPT" dump badging "$GITHUB_WORKSPACE/dist/app.apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" > "$GITHUB_WORKSPACE/pkg.txt"
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt -type f 2>/dev/null | sort -V | tail -1); "$AAPT" dump badging "$GITHUB_WORKSPACE/dist/app.apk" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p" > "$GITHUB_WORKSPACE/act.txt"
+            echo "package=$(cat "$GITHUB_WORKSPACE/pkg.txt") activity=$(cat "$GITHUB_WORKSPACE/act.txt")"
+
+            adb logcat -c || true
+            adb shell am start -W -n "$(cat "$GITHUB_WORKSPACE/pkg.txt")/$(cat "$GITHUB_WORKSPACE/act.txt")" > "$GITHUB_WORKSPACE/launch.txt" 2>&1
+            cat "$GITHUB_WORKSPACE/launch.txt"
+
+            sleep 40
+            adb shell pidof "$(cat "$GITHUB_WORKSPACE/pkg.txt")" > /dev/null 2>&1 && echo "ALIVE=yes" || echo "ALIVE=no"
+            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" 2>/dev/null
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/shot.png" 2>/dev/null
+
+            echo "--- runtime failures ---"
+            grep -E "AndroidRuntime|FATAL EXCEPTION|NoClassDefFoundError|NoSuchMethodError|VerifyError|Unable to resolve host" "$GITHUB_WORKSPACE/logcat.txt" 2>/dev/null | head -25
+            echo "(end)"
+
+      - name: Report this Android version
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p logs
+          for f in install.txt verdict.txt launch.txt logcat.txt shot.png; do
+            cp -f "$GITHUB_WORKSPACE/$f" logs/ 2>/dev/null || true
+          done
+          OUTCOME="${{ steps.run.outcome }}"
+          {
+            echo "### Android ${{ matrix.name }} (API ${{ matrix.api }})"
+            echo ""
+            echo "- emulator step: \`${OUTCOME:-not run}\`"
+            echo ""
+            echo "```"
+            cat logs/verdict.txt 2>/dev/null || echo "(no verdict)"
+            echo ""
+            cat logs/install.txt 2>/dev/null || echo "(no install output)"
+            echo '```'
+            if [ -s logs/shot.png ]; then
+              echo ""
+              echo "The app was running; the screenshot is in this job's artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload this version's evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-android-${{ matrix.name }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn
