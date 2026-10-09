@@ -37,21 +37,62 @@ jobs:
       target_sdk: ${{ steps.badging.outputs.target_sdk }}
       abis: ${{ steps.badging.outputs.abis }}
     steps:
-      - name: Download the published APK
-        id: get
+      - name: Write the release-picker helper
+        run: |
+          import json
+          import sys
+
+          # Choose the highest released version that actually carries an APK.
+          #
+          # `/releases/latest` returns the most recently published release, not the
+          # highest version, so a rebuild that lands on an older tag stays invisible to
+          # every workflow that downloads from it. Compare the numeric triple rather than
+          # the tag string, because v0.0.9 sorts after v0.0.10 alphabetically.
+          #
+          # Exits non-zero on an API error or when nothing is published, so an empty URL
+          # is never mistaken for "no releases".
+          with open("releases.json", encoding="utf-8") as fh:
+              rels = json.load(fh)
+
+          if isinstance(rels, dict):
+              sys.exit("releases API returned an error: " + json.dumps(rels)[:300])
+
+          best = None
+          for r in rels:
+              if r.get("draft"):
+                  continue
+              url = next(
+                  (a["browser_download_url"] for a in r.get("assets", []) if a["name"].endswith(".apk")),
+                  None,
+              )
+              if not url:
+                  continue
+              try:
+                  key = [int(part) for part in r["tag_name"].lstrip("v").split(".")]
+              except (ValueError, KeyError):
+                  continue
+              if best is None or key > best[0]:
+                  best = (key, url)
+
+          if best is None:
+              sys.exit("no published release carries an APK")
+
+          print(best[1])
+
+      - name: Resolve which release to test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          mkdir -p dist
-          URL=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | jq -r '[.[] | select(.draft == false) | {v: .tag_name, u: ([.assets[] | select(.name | endswith(".apk")) | .browser_download_url] | first)}] | map(select(.u != null)) | sort_by(.v | ltrimstr("v") | split(".") | map(tonumber)) | last | .u // empty'
-          echo "url: ${URL:-none}"
-          if [ -n "$URL" ]; then
-            curl -sSL -o dist/app.apk "$URL"
-          fi
-          ls -la dist/
-          test -s dist/app.apk || { echo "::error::could not download the APK"; exit 1; }
-          echo "size=$(stat -c%s dist/app.apk)" >> "$GITHUB_OUTPUT"
+          # `/releases/latest` is the most recently published release, not the
+          # highest version, so a rebuild landing on an older tag would never be
+          # tested. Pick the highest vN.N.N, comparing the numeric triple because
+          # v0.0.9 sorts after v0.0.10 as a string. Parsed with python because
+          # jq is not installed on every runner image.
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" -o releases.json
+          python3 resolve_apk.py > apk-url.txt
+          echo "testing: $(cat apk-url.txt 2>/dev/null || echo none)"
+          test -s apk-url.txt || { echo "::error::could not resolve a release URL"; exit 1; }
 
       - name: Read the manifest facts that decide installability
         id: badging
