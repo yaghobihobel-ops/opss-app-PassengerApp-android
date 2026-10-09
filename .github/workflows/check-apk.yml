@@ -81,7 +81,10 @@ jobs:
 
           print(best[1])
           PYEOF
+          mkdir -p dist
           python3 resolve_apk.py > apk-url.txt
+          curl -sSL -o dist/app.apk "$(cat apk-url.txt)"
+          ls -la dist/
           echo "testing: $(cat apk-url.txt 2>/dev/null || echo none)"
           test -s apk-url.txt || { echo "::error::could not resolve a release URL"; exit 1; }
 
