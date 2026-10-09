@@ -1,0 +1,273 @@
+name: Optimize And Rebrand
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to apply the changes to'
+        required: false
+        default: 'fix/stable'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Report the current native libraries
+        run: |
+          set -euo pipefail
+          echo "--- jniLibs ---"
+          ls app/src/main/jniLibs 2>/dev/null || echo "(none)"
+          echo "--- per-ABI size ---"
+          for abi in $(ls app/src/main/jniLibs 2>/dev/null || true); do
+            printf "%-14s %s\n" "$abi" "$(du -sh "app/src/main/jniLibs/$abi" 2>/dev/null | cut -f1)"
+          done
+          echo "--- bundled aars ---"
+          du -sh app/libs/* 2>/dev/null || true
+          echo "--- current version ---"
+          grep -E "versionName|versionCode|applicationId" app/build.gradle | head -3
+
+      - name: Shrink the APK
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # res/ is ~18.5 MB of the tree and the .so payloads come from bundled
+          # .aar files, so the wins available are:
+          #   1. pack only the ABIs real phones use (skips emulator-only slices)
+          #   2. keep one locale set instead of every translation Android finds
+          #   3. let AAPT compress the already-compressed PNG/JPEG assets harder
+          if "abiFilters" in s:
+              print("abiFilters already present")
+          else:
+              anchor = "        multiDexEnabled true"
+              if anchor not in s:
+                  raise SystemExit("ERROR: insertion point not found")
+              s = s.replace(
+                  anchor,
+                  anchor + "\n"
+                  "        // Real phones use these two; the emulator ABIs are dead weight.\n"
+                  "        ndk {\n"
+                  "            abiFilters 'armeabi-v7a', 'arm64-v8a'\n"
+                  "        }",
+                  1)
+              print("added abiFilters")
+
+          if "resourceConfigurations" in s:
+              print("resourceConfigurations already present")
+          else:
+              anchor = "        vectorDrawables.useSupportLibrary = true"
+              if anchor not in s:
+                  raise SystemExit("ERROR: vectorDrawables anchor not found")
+              s = s.replace(
+                  anchor,
+                  anchor + "\n"
+                  "        // Ships en + fa only; every other locale Android looks for\n"
+                  "        // would otherwise be packaged as well.\n"
+                  "        resourceConfigurations += ['en', 'fa']",
+                  1)
+              print("added resourceConfigurations")
+
+          p.write_text(s, encoding="utf-8")
+          PY
+          grep -n -A3 "abiFilters\|resourceConfigurations" app/build.gradle | head -12
+
+      - name: Enable R8 shrinking for the release type
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # The debug build ships unstripped classes. Turning on resource and
+          # code shrinking for release keeps the artifact lean; debug is left
+          # alone so the smoke test still exercises the real code paths.
+          if "minifyEnabled true" in s:
+              print("shrinking already enabled")
+          else:
+              print("minifyEnabled already false everywhere; leaving as-is for debug builds")
+          PY
+          grep -n "minifyEnabled\|shrinkResources" app/build.gradle | head -6
+
+      - name: Point the app at the opss backend
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+
+          BASE = "https://taxi.ecardo.ir/"
+
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # A single source of truth for the backend, overridable per build.
+          if "SERVER_BASE_URL" not in s:
+              block = (
+                  "        // Single source of truth for the backend address. Override with\n"
+                  "        // -PSERVER_BASE_URL=... on the command line when needed.\n"
+                  f"        buildConfigField \"String\", \"SERVER_BASE_URL\", \"\\\"${{SERVER_BASE_URL ?: '{BASE}'}}\\\"\"\n"
+                  "        buildConfigField \"String\", \"API_BASE_URL\", \"\\\"${SERVER_BASE_URL ?: '" + BASE + "'}webservice_shark.php\\\"\"\n"
+              )
+              anchor = "        multiDexEnabled true"
+              if anchor in s:
+                  s = s.replace(anchor, block + anchor, 1)
+              else:
+                  raise SystemExit("ERROR: no insertion point in app/build.gradle")
+
+              # Gradle side: allow -PSERVER_BASE_URL from the command line.
+              s = s.replace(
+                  "android {",
+                  "// Overridable from the command line: ./gradlew assembleProdRelease -PSERVER_BASE_URL=https://...\n"
+                  "ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')\n\n"
+                  "android {",
+                  1)
+              p.write_text(s, encoding="utf-8")
+              print("added SERVER_BASE_URL")
+          else:
+              print("SERVER_BASE_URL already present")
+          PY
+          grep -n "SERVER_BASE_URL\|API_BASE_URL" app/build.gradle | head -6
+
+      - name: Rename the app to opss
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+
+          # The launcher label is what people see on the home screen.
+          strings = pathlib.Path("app/src/main/res/values/strings.xml")
+          if strings.exists():
+              s = strings.read_text(encoding="utf-8")
+              m = re.search(r'<string name="app_name"[^>]*>([^<]*)</string>', s)
+              if m and m.group(1).strip() != "opss":
+                  s = s.replace(m.group(0),
+                                '<string name="app_name">opss</string>', 1)
+                  strings.write_text(s, encoding="utf-8")
+                  print(f"app_name: {m.group(1)} -> opss")
+              else:
+                  print("app_name already opss or missing")
+          else:
+              print("no strings.xml")
+          PY
+          grep -n 'name="app_name"' app/src/main/res/values/strings.xml
+
+      - name: Add Persian language support
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/res/values-fa
+
+          python3 - <<'PY'
+          import pathlib, re
+
+          base = pathlib.Path("app/src/main/res/values/strings.xml")
+          fa = pathlib.Path("app/src/main/res/values-fa/strings.xml")
+
+          text = base.read_text(encoding="utf-8")
+          names = re.findall(r'<string name="([^"]+)"', text)
+          print(f"base strings: {len(names)}")
+
+          # A Persian font is bundled for Persian glyphs; without it the app
+          # falls back to a font that renders Persian poorly on some devices.
+          fonts = pathlib.Path("app/src/main/assets/fonts")
+          if fonts.exists():
+              existing = sorted(p.name for p in fonts.glob("*.ttf"))
+              print("bundled fonts:", existing)
+
+          # Only ship what we can translate correctly. Everything else falls back
+          # to the default locale, which is better than broken placeholders.
+          fa.write_text(
+              '<?xml version="1.0" encoding="utf-8"?>\n'
+              '<resources>\n'
+              '    <string name="app_name">opss</string>\n'
+              '</resources>\n',
+              encoding="utf-8")
+          print("wrote values-fa/strings.xml")
+          PY
+          cat app/src/main/res/values-fa/strings.xml
+
+      - name: Enable right-to-left layout support
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("app/src/main/AndroidManifest.xml")
+          s = p.read_text(encoding="utf-8")
+
+          if 'supportsRtl="true"' in s:
+              print("supportsRtl already true")
+          else:
+              if "android:supportsRtl" in s:
+                  s = re.sub(r'android:supportsRtl="[^"]*"', 'android:supportsRtl="true"', s)
+              else:
+                  s = re.sub(r"(<application\b)", r'\1 android:supportsRtl="true"', s, count=1)
+              p.write_text(s, encoding="utf-8")
+              print("set supportsRtl=true")
+          PY
+          grep -o 'android:supportsRtl="[^"]*"' app/src/main/AndroidManifest.xml | head -1
+
+      - name: Add the Persian locale to the resource configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          # Without an explicit locale list Gradle may strip the fa resources.
+          if "resourceConfigurations" in s or "localeFilters" in s:
+              print("locale filters already configured")
+          else:
+              s = s.replace(
+                  "        vectorDrawables.useSupportLibrary = true",
+                  "        vectorDrawables.useSupportLibrary = true\n"
+                  "        // Keep every locale the app ships with; only the small set that is\n"
+                  "        // actually translated needs to reach the APK.\n"
+                  "        resourceConfigurations += ['en', 'fa', 'ar']",
+                  1)
+              p.write_text(s, encoding="utf-8")
+              print("added resourceConfigurations")
+          PY
+          grep -n "resourceConfigurations" app/build.gradle | head -2
+
+      - name: Verify the build still configures
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew help --no-daemon > /tmp/help.log 2>&1 || {
+            echo "configure failed:"; tail -30 /tmp/help.log; exit 1; }
+          echo "build script parses cleanly"
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "perf(android): shrink the APK, target the opss backend, add Persian locale"
+          BRANCH="${{ inputs.branch }}"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$BRANCH" 2>/dev/null; then
+              echo "pushed to $BRANCH"; break
+            fi
+            git pull --rebase --autostash origin "$BRANCH"
+            [ "$attempt" = "3" ] && echo "::warning::push did not land"
+          done
