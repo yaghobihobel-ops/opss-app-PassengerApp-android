@@ -108,11 +108,26 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Record the facts as an artifact
+        run: |
+          set -uo pipefail
+          {
+            echo "minSdkVersion: ${{ steps.badging.outputs.min_sdk }}"
+            echo "targetSdkVersion: ${{ steps.badging.outputs.target_sdk }}"
+            echo "ABIs: ${{ steps.badging.outputs.abis }}"
+            echo ""
+            echo "--- full badging ---"
+            cat /tmp/badging.txt
+          } > "$GITHUB_WORKSPACE/apk-facts.txt"
+          cat "$GITHUB_WORKSPACE/apk-facts.txt" | head -20
+
       - name: Publish the APK for the matrix jobs
         uses: actions/upload-artifact@v4
         with:
           name: matrix-apk
-          path: dist/app.apk
+          path: |
+            dist/app.apk
+            apk-facts.txt
           retention-days: 1
           if-no-files-found: error
 
