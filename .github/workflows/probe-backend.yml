@@ -1,0 +1,104 @@
+name: Probe the opss backend
+
+# The app installs and runs, but every call to the backend fails with HTTP 500
+# and an empty body. This reproduces the exact request the app makes and reports
+# what the server answers, so the problem is diagnosed from evidence rather than
+# from the symptom the user sees on the phone.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-backend.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Call the backend the way the app does
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Call webservice_shark.php with the app's parameters
+        run: |
+          set -uo pipefail
+          BASE="https://taxi.ecardo.ir"
+
+          {
+            echo "### Backend probe"
+            echo ""
+            echo "The app sends this as its first request after launch:"
+            echo '```'
+            echo "POST $BASE/webservice_shark.php"
+            echo "type=countryList&GeneralUserType=Passenger&GeneralAppVersionCode=<build>"
+            echo '```'
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "=== GET with no parameters ==="
+          curl -sS -D /tmp/h1 -o /tmp/b1 -w "http=%{http_code} bytes=%{size_download} time=%{time_total}\n" --max-time 30 "$BASE/webservice_shark.php" || true
+          head -1 /tmp/h1 2>/dev/null
+          echo "--- body ---"
+          head -c 600 /tmp/b1 2>/dev/null; echo
+
+          echo ""
+          echo "=== POST with type=countryList ==="
+          curl -sS -D /tmp/h2 -o /tmp/b2 \
+               -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+               -d "type=countryList&GeneralUserType=Passenger&GeneralAppVersionCode=76&GeneralDeviceType=Android&vUserDeviceCountry=us" \
+               -w "http=%{http_code} bytes=%{size_download} time=%{time_total}\n" --max-time 30 \
+               "$BASE/webservice_shark.php" || true
+          head -1 /tmp/h2 2>/dev/null
+          echo "--- body ---"
+          head -c 600 /tmp/b2 2>/dev/null; echo
+
+          {
+            echo "#### GET result"
+            echo '```'
+            head -1 /tmp/h1 2>/dev/null
+            head -c 400 /tmp/b1 2>/dev/null
+            echo '```'
+            echo ""
+            echo "#### POST result"
+            echo '```'
+            head -1 /tmp/h2 2>/dev/null
+            head -c 400 /tmp/b2 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the other endpoints the app depends on
+        run: |
+          set -uo pipefail
+          BASE="https://taxi.ecardo.ir"
+          {
+            echo ""
+            echo "#### Other endpoints"
+            echo ""
+            echo "| path | status |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for P in "" "index.php" "webservice_shark.php" "webimages/" "assets/libraries/webview/payment_configuration_trip.php"; do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 25 "$BASE/$P" 2>/dev/null || echo "---")
+            printf "%-52s %s\n" "/$P" "$CODE"
+            echo "| \`/$P\` | $CODE |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Check the TLS certificate and DNS
+        run: |
+          set -uo pipefail
+          echo "=== certificate ==="
+          echo | timeout 30 openssl s_client -connect taxi.ecardo.ir:443 -servername taxi.ecardo.ir 2>/dev/null \
+            | openssl x509 -noout -subject -issuer -dates 2>/dev/null || echo "(openssl probe unavailable)"
+          echo "=== dns ==="
+          getent hosts taxi.ecardo.ir || echo "(no A record via getent)"
+
+      - name: Save the raw evidence
+        if: always()
+        run: |
+          mkdir -p probe
+          for f in h1 b1 h2 b2; do
+            [ -f "/tmp/$f" ] && cp "/tmp/$f" "probe/$f.txt"
+          done
+          ls -la probe/
