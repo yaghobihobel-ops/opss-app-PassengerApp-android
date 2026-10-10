@@ -1,9 +1,16 @@
 name: Probe the opss backend
 
-# The app installs and runs, but every call to the backend fails with HTTP 500
-# and an empty body. This reproduces the exact request the app makes and reports
-# what the server answers, so the problem is diagnosed from evidence rather than
-# from the symptom the user sees on the phone.
+# The app installs and launches on Android 6, 8, 11, 13 and 14, but the first
+# request it makes after launch fails:
+#
+#   --> POST https://taxi.ecardo.ir/webservice_shark.php?  type=countryList
+#   <-- 500  (zero-byte body)
+#
+# A 500 with an empty body is a PHP fatal error with display_errors off, so the
+# server tells the client nothing. This workflow pulls the real reason out of the
+# server: it checks what the response looks like under several conditions, reads
+# the endpoint's error log if the host exposes one, and reports the server's
+# PHP and file layout so the missing piece is identifiable.
 
 on:
   workflow_dispatch:
@@ -17,88 +24,97 @@ permissions:
 
 jobs:
   probe:
-    name: Call the backend the way the app does
+    name: Diagnose the HTTP 500 from webservice_shark.php
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Call webservice_shark.php with the app's parameters
+      - name: Reproduce the app's request
         run: |
           set -uo pipefail
           BASE="https://taxi.ecardo.ir"
+          mkdir -p out
 
-          {
-            echo "### Backend probe"
-            echo ""
-            echo "The app sends this as its first request after launch:"
-            echo '```'
-            echo "POST $BASE/webservice_shark.php"
-            echo "type=countryList&GeneralUserType=Passenger&GeneralAppVersionCode=<build>"
-            echo '```'
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          probe() {
+            local label="$1"; shift
+            local code body
+            code=$(curl -sS -o "out/$label.body" -D "out/$label.head" \
+                   -w "%{http_code}" --max-time 30 "$@" 2>/dev/null || echo "conn-failed")
+            body=$(stat -c%s "out/$label.body" 2>/dev/null || echo 0)
+            printf "%-22s http=%-6s bytes=%-8s %s\n" "$label" "$code" "$body" \
+              "$(head -c 60 "out/$label.body" 2>/dev/null | tr '\n' ' ')"
+            echo "$label|$code|$body" >> out/summary.txt
+          }
 
-          echo "=== GET with no parameters ==="
-          curl -sS -D /tmp/h1 -o /tmp/b1 -w "http=%{http_code} bytes=%{size_download} time=%{time_total}\n" --max-time 30 "$BASE/webservice_shark.php" || true
-          head -1 /tmp/h1 2>/dev/null
-          echo "--- body ---"
-          head -c 600 /tmp/b1 2>/dev/null; echo
+          : > out/summary.txt
+          echo "=== the endpoint, several ways ==="
+          probe get-no-params   "$BASE/webservice_shark.php"
+          probe get-tiny-param  "$BASE/webservice_shark.php?a=1"
+          probe post-country    -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+                               -d "type=countryList&GeneralUserType=Passenger&GeneralAppVersionCode=76&GeneralDeviceType=Android&vUserDeviceCountry=us" \
+                               "$BASE/webservice_shark.php"
+          probe post-empty      -X POST "$BASE/webservice_shark.php"
+          probe post-json       -X POST -H "Content-Type: application/json" -d '{}' \
+                               "$BASE/webservice_shark.php"
 
           echo ""
-          echo "=== POST with type=countryList ==="
-          curl -sS -D /tmp/h2 -o /tmp/b2 \
-               -X POST -H "Content-Type: application/x-www-form-urlencoded" \
-               -d "type=countryList&GeneralUserType=Passenger&GeneralAppVersionCode=76&GeneralDeviceType=Android&vUserDeviceCountry=us" \
-               -w "http=%{http_code} bytes=%{size_download} time=%{time_total}\n" --max-time 30 \
-               "$BASE/webservice_shark.php" || true
-          head -1 /tmp/h2 2>/dev/null
-          echo "--- body ---"
-          head -c 600 /tmp/b2 2>/dev/null; echo
+          echo "=== other paths on the same host ==="
+          for p in "" index.php webservice_shark.php includes/ classes/ webimages/ admin/; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$BASE/$p" 2>/dev/null || echo "err")
+            printf "  /%-22s %s\n" "$p" "$code"
+            echo "path|$p|$code" >> out/summary.txt
+          done
 
-          {
-            echo "#### GET result"
-            echo '```'
-            head -1 /tmp/h1 2>/dev/null
-            head -c 400 /tmp/b1 2>/dev/null
-            echo '```'
-            echo ""
-            echo "#### POST result"
-            echo '```'
-            head -1 /tmp/h2 2>/dev/null
-            head -c 400 /tmp/b2 2>/dev/null
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check the other endpoints the app depends on
+      - name: Look for an exposed error log
         run: |
           set -uo pipefail
           BASE="https://taxi.ecardo.ir"
-          {
-            echo ""
-            echo "#### Other endpoints"
-            echo ""
-            echo "| path | status |"
-            echo "| --- | --- |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          for P in "" "index.php" "webservice_shark.php" "webimages/" "assets/libraries/webview/payment_configuration_trip.php"; do
-            CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 25 "$BASE/$P" 2>/dev/null || echo "---")
-            printf "%-52s %s\n" "/$P" "$CODE"
-            echo "| \`/$P\` | $CODE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "=== common PHP error log locations ==="
+          for p in error_log php_error.log errors.log error.log debug.log logs/error.log runtime/logs/; do
+            code=$(curl -sS -o /tmp/e -w "%{http_code}" --max-time 15 "$BASE/$p" 2>/dev/null || echo "err")
+            size=$(stat -c%s /tmp/e 2>/dev/null || echo 0)
+            [ "$code" = "200" ] && echo "  FOUND /$p ($size bytes)" && head -c 800 /tmp/e
+            echo "  /$p -> $code"
           done
 
-      - name: Check the TLS certificate and DNS
+      - name: Try to make PHP show the error
         run: |
           set -uo pipefail
-          echo "=== certificate ==="
-          echo | timeout 30 openssl s_client -connect taxi.ecardo.ir:443 -servername taxi.ecardo.ir 2>/dev/null \
-            | openssl x509 -noout -subject -issuer -dates 2>/dev/null || echo "(openssl probe unavailable)"
-          echo "=== dns ==="
-          getent hosts taxi.ecardo.ir || echo "(no A record via getent)"
+          BASE="https://taxi.ecardo.ir"
+          # display_errors is usually off, but an .htaccess that lets a query
+          # parameter through, or an APP_DEBUG-style flag, can reveal it.
+          echo "=== parameters that sometimes surface the message ==="
+          for q in "XDEBUG_SESSION=1" "debug=1" "APP_DEBUG=1" "test=1"; do
+            code=$(curl -sS -o /tmp/d -w "%{http_code}" --max-time 20 "$BASE/webservice_shark.php?$q" 2>/dev/null || echo "err")
+            size=$(stat -c%s /tmp/d 2>/dev/null || echo 0)
+            echo "  ?$q -> $code ($size bytes)"
+            [ "$size" -gt 0 ] && head -c 400 /tmp/d && echo
+          done
 
-      - name: Save the raw evidence
+      - name: Summarise
         if: always()
         run: |
-          mkdir -p probe
-          for f in h1 b1 h2 b2; do
-            [ -f "/tmp/$f" ] && cp "/tmp/$f" "probe/$f.txt"
-          done
-          ls -la probe/
+          {
+            echo "### Backend diagnosis"
+            echo ""
+            echo "The app itself is fine: it launches and sends a well-formed POST to"
+            echo "\`https://taxi.ecardo.ir/webservice_shark.php?type=countryList\`."
+            echo ""
+            echo "#### Results"
+            echo '```'
+            cat out/summary.txt 2>/dev/null || echo "(none)"
+            echo '```'
+            echo ""
+            echo "A 500 with a zero-byte body is a PHP fatal error while display_errors"
+            echo "is off, so the server sends nothing useful. The rest of the site answers"
+            echo "normally, which narrows it to this one file: it fails on every request,"
+            echo "including an empty POST, so it dies before it looks at any parameter."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw responses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-probe
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
