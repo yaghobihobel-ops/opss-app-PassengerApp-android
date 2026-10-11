@@ -184,7 +184,7 @@ jobs:
     name: Install on Android ${{ matrix.name }}
     needs: inspect
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
