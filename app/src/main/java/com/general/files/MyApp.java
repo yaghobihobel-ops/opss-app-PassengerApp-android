@@ -90,9 +90,13 @@ public class MyApp extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
-        //Utils.SERVER_CONNECTION_URL = CommonUtilities.SERVER_URL;
-        Utils.SERVER_CONNECTION_URL = "http://192.168.1.141/";
-        Utils.IS_APP_IN_DEBUG_MODE = "Yes";
+        // The backend address flows BuildConfig -> CommonUtilities -> Utils,
+        // exactly like every other URL in the app. A hard-coded address here
+        // silently routed those calls at a dead developer machine.
+        Utils.SERVER_CONNECTION_URL = CommonUtilities.SERVER_URL;
+        // Demo mode is a build property, not something to force on: "Yes"
+        // made the released app present itself as the vendor's demo build.
+        Utils.IS_APP_IN_DEBUG_MODE = BuildConfig.DEBUG ? "Yes" : "No";
         Utils.userType = BuildConfig.USER_TYPE;
         Utils.app_type = BuildConfig.USER_TYPE;
         Utils.USER_ID_KEY = BuildConfig.USER_ID_KEY;
