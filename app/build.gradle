@@ -6,6 +6,22 @@ apply plugin: 'com.google.firebase.crashlytics'
 // Override from the CLI: ./gradlew assembleProdDebug -PSERVER_BASE_URL=https://host/
 ext.SERVER_BASE_URL = project.findProperty('SERVER_BASE_URL')
 
+/*
+ * OPSS_PSS_FIX 2026-10-12: the backend must be one of the two approved opss
+ * hosts (single-source rule from README; BuildConfig.SERVER_BASE_URL stays the
+ * only place the app reads the address from). Fail the build early on anything
+ * else so no APK can ever ship pointed at an unapproved host.
+ */
+ext.APPROVED_BACKEND_HOSTS = ['taxi.ecardo.ir', 'opss.ir']
+if (ext.SERVER_BASE_URL != null) {
+    def hostMatch = (ext.SERVER_BASE_URL =~ /^https:\/\/([^\/\s]+)\/?$/)
+    if (!hostMatch.matches() || !(hostMatch[0][1] in ext.APPROVED_BACKEND_HOSTS)) {
+        throw new GradleException(
+            "SERVER_BASE_URL must be https://taxi.ecardo.ir/ or https://opss.ir/ (got: ${ext.SERVER_BASE_URL})")
+    }
+}
+
+
 android {
     configurations {
         all*.exclude group: 'com.squareup.okhttp', module: 'okhttp'
