@@ -326,7 +326,7 @@ jobs:
             echo ""
             echo "- emulator step: \`${OUTCOME:-not run}\`"
             echo ""
-            echo "```"
+            echo '```'
             cat logs/verdict.txt 2>/dev/null || echo "(no verdict)"
             echo ""
             cat logs/install.txt 2>/dev/null || echo "(no install output)"
