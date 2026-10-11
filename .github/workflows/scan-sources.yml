@@ -32,16 +32,18 @@ jobs:
         run: |
           set -uo pipefail
           echo "=== hosts referenced in sources ==="
+          # `|| true` keeps a matchless grep (the ideal case) from killing the
+          # step under the runner's `bash -e` with pipefail.
           grep -rhoE '(https?://)?[a-zA-Z0-9.-]+\.(com|net|org|io|ir)[a-zA-Z0-9/_.-]*' \
             app/src app/build.gradle 2>/dev/null \
-            | sed 's#^https\?://##' | cut -d/ -f1 | sort | uniq -c | sort -rn | head -40
+            | sed 's#^https\?://##' | cut -d/ -f1 | sort | uniq -c | sort -rn | head -40 || true
 
       - name: Look for hard-coded IP literals
         run: |
           set -uo pipefail
           echo "=== IP literals in sources ==="
           grep -rnoE 'https?://[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?' \
-            app/src app/build.gradle 2>/dev/null | head -30
+            app/src app/build.gradle 2>/dev/null | head -30 || true
           echo "(end of list)"
           echo ""
           echo "=== the retired server IP must not appear anywhere ==="
