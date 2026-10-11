@@ -36,6 +36,24 @@ jobs:
             app/src app/build.gradle 2>/dev/null \
             | sed 's#^https\?://##' | cut -d/ -f1 | sort | uniq -c | sort -rn | head -40
 
+      - name: Look for hard-coded IP literals
+        run: |
+          set -uo pipefail
+          echo "=== IP literals in sources ==="
+          grep -rnoE 'https?://[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?' \
+            app/src app/build.gradle 2>/dev/null | head -30
+          echo "(end of list)"
+          echo ""
+          echo "=== the retired server IP must not appear anywhere ==="
+          # The October 2026 migration moved the backend to a new server; the old
+          # address no longer answers. A leftover reference here would silently
+          # route requests at a dead host, so the scan fails on it.
+          if grep -rn '46\.100\.58\.20' app/src app/build.gradle 2>/dev/null; then
+            echo "::error::the retired host 46.100.58.20 is still referenced"
+            exit 1
+          fi
+          echo "(clean)"
+
       - name: Show the lines that mention the vendor domain
         run: |
           set -uo pipefail
@@ -71,6 +89,9 @@ jobs:
           {
             echo "### Source scan"
             echo ""
-            echo "Full host list, the vendor-domain matches and the BuildConfig wiring"
-            echo "are in this step's log above."
+            echo "Full host list, IP literals, the vendor-domain matches and the"
+            echo "BuildConfig wiring are in this step's log above."
+            echo ""
+            echo "The retired host \`46.100.58.20\` must never appear in the sources;"
+            echo "if it does, this workflow fails on it."
           } >> "$GITHUB_STEP_SUMMARY"
