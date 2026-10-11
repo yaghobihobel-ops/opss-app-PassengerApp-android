@@ -307,11 +307,13 @@ jobs:
             echo "> **Install note:** this is a *debug* build, signed with the standard"
             echo "> Android debug key. If it will not install on your phone, uninstall the"
             echo "> previously installed copy first — Android refuses to replace an app"
-            echo "> signed with a different key. Debug builds also point at a placeholder"
-            echo "> Firebase project, so login and push will not work yet."
+            echo "> signed with a different key. The packaged google-services.json is"
+            echo "> still the vendor's Firebase project (alaadcin-c3cd4), so Crashlytics"
+            echo "> and push depend on that project until it is replaced with your own."
             echo ""
-            echo "Runtime behaviour is verified separately by the"
-            echo "`Verify install on a real device image` workflow."
+            echo 'Runtime behaviour is verified separately by the'
+            echo '`Test install across Android versions` and'
+            echo '`Verify install on a real device image` workflows.'
             echo ""
             echo "### What changed and why"
             echo ""
