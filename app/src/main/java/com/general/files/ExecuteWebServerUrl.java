@@ -228,8 +228,18 @@ public class ExecuteWebServerUrl {
                         }
                         performPostCall();
                     } else {
-                        responseString = "";
-                        fireResponse();
+                        /* OPSS_PSS_FIX 2026-10-15: FCM registration fails on devices
+                         * without Google Play Services and on networks where FCM is
+                         * blocked (Iran). The old code aborted the request entirely,
+                         * so signIn/signup never reached the server and the user was
+                         * left on the login screen with a generic error. The backend
+                         * accepts these calls without a device token, so send the
+                         * request with an empty token instead of dropping it. */
+                        if (parameters != null) {
+                            parameters.put(key_DeviceToken_param, "");
+                            parameters.put("vFirebaseDeviceToken", "");
+                        }
+                        performPostCall();
                     }
                 } else {
 
