@@ -363,22 +363,14 @@ jobs:
             echo "package=$(cat "$GITHUB_WORKSPACE/pkg.txt") activity=$(cat "$GITHUB_WORKSPACE/act.txt")"
 
             adb logcat -c || true
-            # No -W: that flag blocks until the activity reports itself drawn, and
-            # on a runner without KVM the emulator is software-rendered, so
-            # LauncherActivity never reports drawn and the step hangs until the
-            # job timeout — which is exactly how the API 23/26/30 jobs were
-            # cancelled (run 38706883553 sat here from 08:40 to 09:22 after a
-            # successful install). `timeout` bounds the launch and the verdict
-            # below comes from whether the process is alive, not from -W.
+            # No -W: it blocks until the activity reports drawn, which never happens on a software-rendered emulator, and the step then hangs until the job timeout.
+            # `timeout` bounds the launch; the verdict below is the process being alive, not -W.
             timeout 120 adb shell am start -n "$(cat "$GITHUB_WORKSPACE/pkg.txt")/$(cat "$GITHUB_WORKSPACE/act.txt")" > "$GITHUB_WORKSPACE/launch.txt" 2>&1 || true
             cat "$GITHUB_WORKSPACE/launch.txt"
 
             sleep 40
-            if adb shell pidof "$(cat "$GITHUB_WORKSPACE/pkg.txt")" > /dev/null 2>&1; then
-              echo "ALIVE=yes" | tee "$GITHUB_WORKSPACE/alive.txt"
-            else
-              echo "ALIVE=no" | tee "$GITHUB_WORKSPACE/alive.txt"
-            fi
+            adb shell pidof "$(cat "$GITHUB_WORKSPACE/pkg.txt")" > /dev/null 2>&1 && echo "ALIVE=yes" > "$GITHUB_WORKSPACE/alive.txt" || echo "ALIVE=no" > "$GITHUB_WORKSPACE/alive.txt"
+            cat "$GITHUB_WORKSPACE/alive.txt"
             adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" 2>/dev/null
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/shot.png" 2>/dev/null
 
