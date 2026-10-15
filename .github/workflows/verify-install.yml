@@ -19,6 +19,11 @@ on:
 
 permissions:
   contents: read
+  # Needed to download the APK artifact the Build workflow produced for this
+  # commit. Without it the artifact endpoint answers 401 and the resolver
+  # silently falls back to the newest release, which is not the commit under
+  # verification once releases are published on purpose.
+  actions: read
 
 concurrency:
   group: opss-verify-${{ github.ref }}
@@ -174,8 +179,14 @@ jobs:
                   open("apk.zip", "wb").write(data)
                   print("artifact:" + str(mine[-1]["id"]))
                   sys.exit(0)
-          except Exception as exc:  # noqa: BLE001 - fall through to the release
-              print("no usable build artifact for this commit: " + str(exc)[:200], file=sys.stderr)
+          except Exception as exc:  # noqa: BLE001
+              # A missing artifact and an unauthorised one are different: the
+              # first is expected on a branch with no build, the second means the
+              # job is about to verify the wrong commit. Say which one happened.
+              msg = str(exc)
+              print("no usable build artifact for this commit: " + msg[:200], file=sys.stderr)
+              if "401" in msg or "403" in msg or "authenticate" in msg.lower():
+                  sys.exit("artifact download was refused (missing actions:read?): " + msg[:300])
 
           # `/releases/latest` is the most recently published release, not the
           # highest, so a rebuild landing on an older tag would stay invisible;
