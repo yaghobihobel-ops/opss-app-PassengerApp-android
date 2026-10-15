@@ -295,7 +295,11 @@ jobs:
                         adb shell pm list packages 2>/dev/null | grep -F "$(cat "$GITHUB_WORKSPACE/package.txt")" > /dev/null && echo "PACKAGE_PRESENT=yes" || echo "PACKAGE_PRESENT=no"
 
                         adb logcat -c || true
-                        adb shell am start -W -n "$(cat "$GITHUB_WORKSPACE/package.txt")/$(cat "$GITHUB_WORKSPACE/activity.txt")" > "$GITHUB_WORKSPACE/launch-result.txt" 2>&1
+                        # No -W: it blocks until the activity reports drawn, and a
+                        # software-rendered emulator (no KVM on the runner) never
+                        # gets there, so the step hangs until the job timeout. The
+                        # verdict below comes from the process still being alive.
+                        timeout 120 adb shell am start -n "$(cat "$GITHUB_WORKSPACE/package.txt")/$(cat "$GITHUB_WORKSPACE/activity.txt")" > "$GITHUB_WORKSPACE/launch-result.txt" 2>&1 || true
                         cat "$GITHUB_WORKSPACE/launch-result.txt"
 
                         sleep 45
