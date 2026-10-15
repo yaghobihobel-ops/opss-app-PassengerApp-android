@@ -37,65 +37,104 @@ jobs:
       target_sdk: ${{ steps.badging.outputs.target_sdk }}
       abis: ${{ steps.badging.outputs.abis }}
     steps:
-      - name: Resolve which release to test
+      # Which APK to test, in order of preference:
+      #   1. the artifact the Build workflow produced for this exact commit, so
+      #      the commit under test is the commit that was built;
+      #   2. otherwise the highest published release, which keeps a manual or
+      #      scheduled run working when no build artifact exists for the commit.
+      # Resolved by one python script because jq is not on every runner image.
+      - name: Resolve the APK to test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          # `/releases/latest` is the most recently published release, not the
-          # highest version, so a rebuild landing on an older tag would never be
-          # tested. Pick the highest vN.N.N, comparing the numeric triple because
-          # v0.0.9 sorts after v0.0.10 as a string. Parsed with python because
-          # jq is not installed on every runner image.
-          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" -o releases.json
+          mkdir -p dist
           cat > resolve_apk.py <<'PYEOF'
           import json
+          import os
           import sys
+          import urllib.request
 
-          # Choose the highest released version that actually carries an APK.
-          #
-          # `/releases/latest` returns the most recently published release, not the
-          # highest version, so a rebuild landing on an older tag stays invisible to every
-          # workflow that downloads from it. Compare the numeric triple rather than the
-          # tag string, because v0.0.9 sorts after v0.0.10 alphabetically.
-          #
-          # Exits non-zero on an API error or when nothing is published, so an empty URL
-          # is never mistaken for "no releases". Parsed with python because jq is not
-          # installed on every runner image.
-          with open("releases.json", encoding="utf-8") as fh:
-              rels = json.load(fh)
+          repo = os.environ["REPO"]
+          sha = os.environ["SHA"]
+          token = os.environ["GH_TOKEN"]
+          api = "https://api.github.com/repos/" + repo
 
+          def get(url):
+              req = urllib.request.Request(url, headers={
+                  "Authorization": "Bearer " + token,
+                  "Accept": "application/vnd.github+json",
+              })
+              with urllib.request.urlopen(req, timeout=60) as fh:
+                  return json.load(fh)
+
+          # 1. the APK the Build workflow produced for this exact commit. The two
+          #    workflows are separate runs, so this is found by head_sha rather
+          #    than by the current run id. Preferring it means the matrix tests the
+          #    commit it was triggered by, not whatever release happens to be
+          #    newest now that releases are published on purpose.
+          try:
+              runs = get(api + "/actions/runs?head_sha=" + sha + "&per_page=100").get("workflow_runs", [])
+              build_runs = sorted(
+                  (r for r in runs if r.get("name") == "Build and Release" and r.get("conclusion") == "success"),
+                  key=lambda r: r["run_number"], reverse=True)
+              for r in build_runs:
+                  arts = get(api + "/actions/runs/" + str(r["id"]) + "/artifacts?per_page=100").get("artifacts", [])
+                  mine = sorted((a for a in arts if a["name"].startswith("opss-")), key=lambda a: a["name"])
+                  if not mine:
+                      continue
+                  art = mine[-1]
+                  print("using the build artifact for this commit: " + art["name"], file=sys.stderr)
+                  data = urllib.request.urlopen(urllib.request.Request(
+                      api + "/actions/artifacts/" + str(art["id"]) + "/zip",
+                      headers={"Authorization": "Bearer " + token}), timeout=300).read()
+                  open("apk.zip", "wb").write(data)
+                  print("artifact-id=" + str(art["id"]))
+                  sys.exit(0)
+          except Exception as exc:  # noqa: BLE001 - fall through to the release
+              print("no usable build artifact for this commit: " + str(exc)[:200], file=sys.stderr)
+
+          # 2. the highest published release that carries an APK. `/releases/latest`
+          #    is the most recently published, not the highest, so a rebuild landing
+          #    on an older tag would stay invisible; compare the numeric triple,
+          #    because v0.0.9 sorts after v0.0.10 as a string.
+          rels = get(api + "/releases?per_page=100")
           if isinstance(rels, dict):
               sys.exit("releases API returned an error: " + json.dumps(rels)[:300])
-
           best = None
           for r in rels:
               if r.get("draft"):
                   continue
-              url = next(
-                  (a["browser_download_url"] for a in r.get("assets", []) if a["name"].endswith(".apk")),
-                  None,
-              )
+              url = next((a["browser_download_url"] for a in r.get("assets", [])
+                          if a["name"].endswith(".apk")), None)
               if not url:
                   continue
               try:
-                  key = [int(part) for part in r["tag_name"].lstrip("v").split(".")]
+                  key = [int(p) for p in r["tag_name"].lstrip("v").split(".")]
               except (ValueError, KeyError):
                   continue
               if best is None or key > best[0]:
                   best = (key, url)
-
           if best is None:
               sys.exit("no published release carries an APK")
-
-          print(best[1])
+          print("using the highest release: " + best[1], file=sys.stderr)
+          print("url=" + best[1])
           PYEOF
-          mkdir -p dist
-          python3 resolve_apk.py > apk-url.txt
-          curl -sSL -o dist/app.apk "$(cat apk-url.txt)"
+          python3 resolve_apk.py > resolved.txt
+          if grep -q '^artifact-id=' resolved.txt; then
+            unzip -o -q apk.zip -d unpacked
+            APK=$(find unpacked -name '*.apk' | head -1)
+            [ -n "$APK" ] || { echo "::error::the artifact carried no APK"; exit 1; }
+            cp "$APK" dist/app.apk
+          else
+            URL=$(sed -n 's/^url=//p' resolved.txt)
+            test -n "$URL" || { echo "::error::could not resolve an APK"; exit 1; }
+            curl -sSL -o dist/app.apk "$URL"
+          fi
           ls -la dist/
-          echo "testing: $(cat apk-url.txt 2>/dev/null || echo none)"
-          test -s apk-url.txt || { echo "::error::could not resolve a release URL"; exit 1; }
+          test -s dist/app.apk || { echo "::error::no APK resolved"; exit 1; }
 
       - name: Read the manifest facts that decide installability
         id: badging
@@ -184,16 +223,23 @@ jobs:
     name: Install on Android ${{ matrix.name }}
     needs: inspect
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Bounded so a wedged emulator fails in minutes rather than eating the whole
+    # budget: the API 23/26/30 jobs previously sat in "Boot ... and install" for
+    # the full 75-minute job timeout and were cancelled with no verdict at all.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { api: 23, name: '6.0' }
-          - { api: 26, name: '8.0' }
-          - { api: 30, name: '11' }
-          - { api: 33, name: '13' }
-          - { api: 34, name: '14' }
+          # The arch has to be per level. The 32-bit x86 images are the ones
+          # that boot reliably on the old system images; the newer levels only
+          # ship a usable 64-bit image. A wrong pairing makes the emulator hang
+          # before it ever reports boot_completed.
+          - { api: 23, name: '6.0', arch: x86 }
+          - { api: 26, name: '8.0', arch: x86 }
+          - { api: 30, name: '11', arch: x86_64 }
+          - { api: 33, name: '13', arch: x86_64 }
+          - { api: 34, name: '14', arch: x86_64 }
     steps:
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -273,12 +319,18 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
-          arch: x86_64
+          # Must match the level: google_apis ships x86 for API 23/26 and only
+          # x86_64 from API 30 up. Asking for x86_64 on API 23 has no image, and
+          # the emulator then hangs before boot_completed instead of failing, which
+          # is why those three jobs burned the full timeout and were cancelled.
+          arch: ${{ matrix.arch }}
           target: google_apis
           profile: Nexus 6
           disable-animations: true
           emulator-options: -no-snapshot -noaudio -no-boot-anim -gpu swiftshader -camera-back none -no-metrics
-          emulator-boot-timeout: 900
+          # Fail the step instead of sitting on a wedged emulator until the job
+          # timeout; the job-level timeout above is the second line of defence.
+          emulator-boot-timeout: 600
           script: |
             set -u
             echo "android release: $(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
