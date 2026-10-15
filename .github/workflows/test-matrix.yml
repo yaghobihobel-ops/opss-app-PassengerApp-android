@@ -92,10 +92,11 @@ jobs:
                       continue
                   art = mine[-1]
                   print("using the build artifact for this commit: " + art["name"], file=sys.stderr)
-                  data = urllib.request.urlopen(urllib.request.Request(
-                      api + "/actions/artifacts/" + str(art["id"]) + "/zip",
-                      headers={"Authorization": "Bearer " + token}), timeout=300).read()
-                  open("apk.zip", "wb").write(data)
+                  # Only the id is reported: the zip endpoint redirects to a
+                  # signed blob URL, and urllib would forward the Authorization
+                  # header there, which Azure rejects with a 401 ("Server failed
+                  # to authenticate"). curl drops the header on a cross-host
+                  # redirect, so the shell downloads it.
                   print("artifact-id=" + str(art["id"]))
                   sys.exit(0)
           except Exception as exc:  # noqa: BLE001
@@ -135,6 +136,13 @@ jobs:
           PYEOF
           python3 resolve_apk.py > resolved.txt
           if grep -q '^artifact-id=' resolved.txt; then
+            AID=$(sed -n 's/^artifact-id=//p' resolved.txt)
+            test -n "$AID" || { echo "::error::no artifact id resolved"; exit 1; }
+            # -L follows the redirect to the signed blob URL and, being a
+            # different host, curl drops the Authorization header there — which
+            # is what urllib got wrong with a 401.
+            curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+              -o apk.zip "https://api.github.com/repos/$REPO/actions/artifacts/$AID/zip"
             unzip -o -q apk.zip -d unpacked
             APK=$(find unpacked -name '*.apk' | head -1)
             [ -n "$APK" ] || { echo "::error::the artifact carried no APK"; exit 1; }

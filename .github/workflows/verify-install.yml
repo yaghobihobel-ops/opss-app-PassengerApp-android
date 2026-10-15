@@ -170,13 +170,10 @@ jobs:
                   mine = sorted((a for a in arts if a["name"].startswith("opss-")), key=lambda a: a["name"])
                   if not mine:
                       continue
-                  # This is a private artifact endpoint, not a public URL, so the
-                  # download below goes through the API with the token rather
-                  # than by plain curl on the URL.
-                  data = urllib.request.urlopen(urllib.request.Request(
-                      api + "/actions/artifacts/" + str(mine[-1]["id"]) + "/zip",
-                      headers={"Authorization": "Bearer " + token}), timeout=300).read()
-                  open("apk.zip", "wb").write(data)
+                  # Only the id is reported: the zip endpoint redirects to a
+                  # signed blob URL, and urllib would forward the Authorization
+                  # header there, which Azure rejects with a 401. curl drops the
+                  # header on a cross-host redirect, so the shell downloads it.
                   print("artifact:" + str(mine[-1]["id"]))
                   sys.exit(0)
           except Exception as exc:  # noqa: BLE001
@@ -218,6 +215,12 @@ jobs:
           # Materialise the APK here, where a token and a full shell are
           # available, so the emulator step only has to install a local file.
           if grep -q '^artifact:' "$GITHUB_WORKSPACE/apk-source.txt"; then
+            AID=$(sed -n 's/^artifact://p' "$GITHUB_WORKSPACE/apk-source.txt")
+            test -n "$AID" || { echo "::error::no artifact id resolved"; exit 1; }
+            # -L follows the redirect to the signed blob URL and, being a
+            # different host, curl drops the Authorization header there.
+            curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+              -o apk.zip "https://api.github.com/repos/$REPO/actions/artifacts/$AID/zip"
             unzip -o -q apk.zip -d unpacked
             APK=$(find unpacked -name '*.apk' | head -1)
             test -n "$APK" || { echo "::error::the artifact carried no APK"; exit 1; }
