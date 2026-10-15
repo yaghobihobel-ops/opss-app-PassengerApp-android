@@ -123,57 +123,101 @@ jobs:
             tail -20 /tmp/xvfb.log 2>/dev/null || true
           fi
 
-      - name: Resolve which release to test
+      - name: Resolve which APK to test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" -o releases.json
+          # The emulator step below runs under `sh -c` line by line and cannot
+          # call the API, so the decision is made here and written to a file it
+          # reads back: the artifact the Build workflow produced for this commit
+          # if there is one, otherwise the highest published release. Preferring
+          # the artifact keeps this test on the commit that triggered it, now that
+          # releases are published on purpose rather than on every push.
           cat > resolve_apk.py <<'PYEOF'
           import json
+          import os
           import sys
+          import urllib.request
 
-          # Choose the highest released version that actually carries an APK.
-          #
-          # `/releases/latest` returns the most recently published release, not the
-          # highest version, so a rebuild landing on an older tag stays invisible to every
-          # workflow that downloads from it. Compare the numeric triple rather than the
-          # tag string, because v0.0.9 sorts after v0.0.10 alphabetically.
-          #
-          # Exits non-zero on an API error or when nothing is published, so an empty URL
-          # is never mistaken for "no releases". Parsed with python because jq is not
-          # installed on every runner image.
-          with open("releases.json", encoding="utf-8") as fh:
-              rels = json.load(fh)
+          repo = os.environ["REPO"]
+          sha = os.environ["SHA"]
+          token = os.environ["GH_TOKEN"]
+          api = "https://api.github.com/repos/" + repo
 
+          def get(url):
+              req = urllib.request.Request(url, headers={
+                  "Authorization": "Bearer " + token,
+                  "Accept": "application/vnd.github+json",
+              })
+              with urllib.request.urlopen(req, timeout=60) as fh:
+                  return json.load(fh)
+
+          try:
+              runs = get(api + "/actions/runs?head_sha=" + sha + "&per_page=100").get("workflow_runs", [])
+              build_runs = sorted(
+                  (r for r in runs if r.get("name") == "Build and Release" and r.get("conclusion") == "success"),
+                  key=lambda r: r["run_number"], reverse=True)
+              for r in build_runs:
+                  arts = get(api + "/actions/runs/" + str(r["id"]) + "/artifacts?per_page=100").get("artifacts", [])
+                  mine = sorted((a for a in arts if a["name"].startswith("opss-")), key=lambda a: a["name"])
+                  if not mine:
+                      continue
+                  # This is a private artifact endpoint, not a public URL, so the
+                  # download below goes through the API with the token rather
+                  # than by plain curl on the URL.
+                  data = urllib.request.urlopen(urllib.request.Request(
+                      api + "/actions/artifacts/" + str(mine[-1]["id"]) + "/zip",
+                      headers={"Authorization": "Bearer " + token}), timeout=300).read()
+                  open("apk.zip", "wb").write(data)
+                  print("artifact:" + str(mine[-1]["id"]))
+                  sys.exit(0)
+          except Exception as exc:  # noqa: BLE001 - fall through to the release
+              print("no usable build artifact for this commit: " + str(exc)[:200], file=sys.stderr)
+
+          # `/releases/latest` is the most recently published release, not the
+          # highest, so a rebuild landing on an older tag would stay invisible;
+          # compare the numeric triple, because v0.0.9 sorts after v0.0.10.
+          rels = get(api + "/releases?per_page=100")
           if isinstance(rels, dict):
               sys.exit("releases API returned an error: " + json.dumps(rels)[:300])
-
           best = None
           for r in rels:
               if r.get("draft"):
                   continue
-              url = next(
-                  (a["browser_download_url"] for a in r.get("assets", []) if a["name"].endswith(".apk")),
-                  None,
-              )
+              url = next((a["browser_download_url"] for a in r.get("assets", [])
+                          if a["name"].endswith(".apk")), None)
               if not url:
                   continue
               try:
-                  key = [int(part) for part in r["tag_name"].lstrip("v").split(".")]
+                  key = [int(p) for p in r["tag_name"].lstrip("v").split(".")]
               except (ValueError, KeyError):
                   continue
               if best is None or key > best[0]:
                   best = (key, url)
-
           if best is None:
               sys.exit("no published release carries an APK")
-
-          print(best[1])
+          print("url:" + best[1])
           PYEOF
-          python3 resolve_apk.py > "$GITHUB_WORKSPACE/apk-url.txt"
-          echo "testing: $(cat "$GITHUB_WORKSPACE/apk-url.txt" 2>/dev/null || echo none)"
-          test -s "$GITHUB_WORKSPACE/apk-url.txt" || { echo "::error::could not resolve a release URL"; exit 1; }
+          python3 resolve_apk.py > "$GITHUB_WORKSPACE/apk-source.txt"
+          echo "testing source: $(cat "$GITHUB_WORKSPACE/apk-source.txt" 2>/dev/null || echo none)"
+
+          # Materialise the APK here, where a token and a full shell are
+          # available, so the emulator step only has to install a local file.
+          if grep -q '^artifact:' "$GITHUB_WORKSPACE/apk-source.txt"; then
+            unzip -o -q apk.zip -d unpacked
+            APK=$(find unpacked -name '*.apk' | head -1)
+            test -n "$APK" || { echo "::error::the artifact carried no APK"; exit 1; }
+            cp "$APK" "$GITHUB_WORKSPACE/apk.apk"
+          else
+            URL=$(sed -n 's/^url://p' "$GITHUB_WORKSPACE/apk-source.txt")
+            test -n "$URL" || { echo "::error::could not resolve an APK URL"; exit 1; }
+            curl -sSL -o "$GITHUB_WORKSPACE/apk.apk" "$URL"
+          fi
+          test -s "$GITHUB_WORKSPACE/apk.apk" || { echo "::error::no APK downloaded"; exit 1; }
+          ls -la "$GITHUB_WORKSPACE/apk.apk"
       - name: Install, launch and capture the logs
         id: run
         if: steps.capable.outputs.KVM == 'ready'
@@ -207,13 +251,10 @@ jobs:
                         # from output text rather than from an exit status.
                         set -u
 
-                        # Fetch the APK from the public release. The repository is public, so
-                        # no token is needed, and the URL is inlined because a variable set
-                        # on an earlier line would be empty here.
-                        echo "release url: $(cat "$GITHUB_WORKSPACE/apk-url.txt")"
-                        curl -sSL -o "$GITHUB_WORKSPACE/apk.apk" "$(cat "$GITHUB_WORKSPACE/apk-url.txt")"
+                        # The APK was downloaded by the previous step, which had a
+                        # token and a full shell. This step only installs it.
                         ls -la "$GITHUB_WORKSPACE/apk.apk"
-                        test -s "$GITHUB_WORKSPACE/apk.apk" && echo "APK_DOWNLOADED=yes" || { echo "APK_MISSING=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
+                        test -s "$GITHUB_WORKSPACE/apk.apk" && echo "APK_PRESENT=yes" || { echo "APK_MISSING=1" > "$GITHUB_WORKSPACE/install-verdict.txt"; exit 1; }
 
                         adb wait-for-device
                         echo "device android=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '[:space:]')"
