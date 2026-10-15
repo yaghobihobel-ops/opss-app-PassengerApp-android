@@ -11,6 +11,11 @@ on:
         description: 'Branch to build (defaults to the one that owns the workflow)'
         required: false
         default: ''
+      release:
+        description: 'Publish a public release and bump the version (off = CI build only)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -33,31 +38,53 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref_name }}
 
-      # The version has to be raised *before* Gradle runs, otherwise the APK
-      # is built with the previous versionCode while the release tag carries the
-      # next one. This edit stays in the workspace only; the commit happens in the
-      # release job, which is the one holding write access.
+      # The version is raised *before* Gradle runs so the APK carries the same
+      # versionName/versionCode as the tag that will be published, and it is
+      # raised only when this run is actually going to publish. A plain CI build
+      # (every push to main, every fix/** push) keeps the version it finds, so a
+      # branch build never burns a version number or renames the artifact to a
+      # release that does not exist.
+      #
+      # This edit stays in the workspace only; the commit happens in the release
+      # job, which is the one holding write access.
       - name: Reserve the next version
         id: bump
+        env:
+          # A manual run publishes when the box is ticked; a push publishes only
+          # when the repository variable AUTO_RELEASE is 'true'. Both are gated on
+          # main because that is the only branch the release job will publish
+          # from — otherwise a manual run on a branch would burn a version number
+          # and then publish nothing.
+          RELEASING: >-
+            ${{ github.ref == 'refs/heads/main' &&
+                ((github.event_name == 'workflow_dispatch' && inputs.release == true) ||
+                 (github.event_name == 'push' && vars.AUTO_RELEASE == 'true')) }}
         run: |
           set -euo pipefail
           GRADLE=app/build.gradle
           CURRENT_NAME=$(grep -oP 'versionName\s+"\K[^"]+' "$GRADLE" | head -1 | tr -d ' ')
           CURRENT_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' "$GRADLE" | head -1)
 
-          MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
-          MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
-          PAT=$(echo "$CURRENT_NAME" | cut -d. -f3); PAT=${PAT:-0}
-          NEXT="$MAJ.$MIN.$((PAT + 1))"
-          NEXT_CODE=$((CURRENT_CODE + 1))
+          if [ "${RELEASING:-false}" = "true" ]; then
+            MAJ=$(echo "$CURRENT_NAME" | cut -d. -f1)
+            MIN=$(echo "$CURRENT_NAME" | cut -d. -f2)
+            PAT=$(echo "$CURRENT_NAME" | cut -d. -f3); PAT=${PAT:-0}
+            NAME="$MAJ.$MIN.$((PAT + 1))"
+            CODE=$((CURRENT_CODE + 1))
 
-          echo "current: $CURRENT_NAME (code $CURRENT_CODE) -> next: $NEXT (code $NEXT_CODE)"
-          sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NEXT\2/" "$GRADLE"
-          sed -i -E "s/(versionCode\s+)[0-9]+/\1$NEXT_CODE/" "$GRADLE"
+            echo "release run: $CURRENT_NAME (code $CURRENT_CODE) -> $NAME (code $CODE)"
+            sed -i -E "s/(versionName\s+\")[^\"]+(\")/\1$NAME\2/" "$GRADLE"
+            sed -i -E "s/(versionCode\s+)[0-9]+/\1$CODE/" "$GRADLE"
+          else
+            NAME="$CURRENT_NAME"
+            CODE="$CURRENT_CODE"
+            echo "CI-only run: keeping $NAME (code $CODE)"
+          fi
+
           grep -nE 'versionName|versionCode' "$GRADLE" | head -2
 
-          echo "name=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17 for the SDK tools
         uses: actions/setup-java@v4
@@ -230,7 +257,20 @@ jobs:
   release:
     name: Bump version and publish release
     needs: build
-    if: github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
+    # A release is now an explicit decision, not a side effect of pushing.
+    # Before this, every push to main bumped the version and published a public
+    # release, so a branch merge could ship an unreviewed build. A push to main
+    # still builds and uploads the artifact; only a manual run with `release:
+    # true` publishes. The bot guard stops the version-bump commit from looping.
+    #
+    # Always restricted to main: this job commits the bump to main and tags the
+    # release from it, so releasing off a branch would publish one commit's APK
+    # under another's version.
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.release == true) ||
+       (github.event_name == 'push' && vars.AUTO_RELEASE == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -265,8 +305,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$GRADLE"
-          git commit -m "chore(release): bump to $NAME (versionCode $CODE) [skip ci]"
-          git push origin HEAD:main
+          # Only a release run raises the version, so there is normally a change
+          # to commit; guard anyway so a re-run on an already-bumped main cannot
+          # fail the job on an empty commit.
+          if git diff --cached --quiet; then
+            echo "version already at $NAME (code $CODE); nothing to commit"
+          else
+            git commit -m "chore(release): bump to $NAME (versionCode $CODE) [skip ci]"
+            git push origin HEAD:main
+          fi
 
       - name: Download the APK from this run
         env:
@@ -317,7 +364,16 @@ jobs:
             echo ""
             echo "### What changed and why"
             echo ""
-            git log "${{ github.event.before }}..${{ github.sha }}" --pretty='- %s (%h)' | head -30 || echo "- (initial)"
+            # `github.event.before` is empty on a manual run, so fall back to the
+            # last 20 commits instead of asking git for an empty range (which is a
+            # usage error and would print nothing useful).
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              RANGE="$BEFORE..${{ github.sha }}"
+            else
+              RANGE="-20"
+            fi
+            git log $RANGE --pretty='- %s (%h)' | head -30 || echo "- (initial)"
             echo ""
             echo "---"
             echo "Built from \`main\` at \`${{ github.sha }}\`."
