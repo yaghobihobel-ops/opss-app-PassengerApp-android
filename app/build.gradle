@@ -59,12 +59,12 @@ android {
         applicationId "com.alaadcin.user"
         minSdkVersion 17
         targetSdkVersion 31
-        versionCode 85
-        versionName "0.0.50"
+        versionCode 86
+        versionName "0.0.51"
         // Single source of truth for the backend address. Override per build
         // with -PSERVER_BASE_URL=https://host/ on the command line.
-        buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "\""
-        buildConfigField "String", "API_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://taxi.ecardo.ir/") + "webservice_shark.php\""
+        buildConfigField "String", "SERVER_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://opss.ir/") + "\""
+        buildConfigField "String", "API_BASE_URL", "\"" + (SERVER_BASE_URL ?: "https://opss.ir/") + "webservice_shark.php\""
         multiDexEnabled true
         /*
          * Every ABI the project must install on, Android 6 through 14.

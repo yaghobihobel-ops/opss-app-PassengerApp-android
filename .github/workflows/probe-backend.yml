@@ -3,7 +3,7 @@ name: Probe the opss backend
 # The app installs and launches on Android 6, 8, 11, 13 and 14, but the first
 # request it makes after launch fails:
 #
-#   --> POST https://taxi.ecardo.ir/webservice_shark.php?  type=countryList
+#   --> POST https://opss.ir/webservice_shark.php?  type=countryList
 #   <-- 500  (zero-byte body)
 #
 # A 500 with an empty body is a PHP fatal error with display_errors off, so the
@@ -31,7 +31,7 @@ jobs:
       - name: Reproduce the app's request
         run: |
           set -uo pipefail
-          BASE="https://taxi.ecardo.ir"
+          BASE="https://opss.ir"
           mkdir -p out
 
           probe() {
@@ -67,7 +67,7 @@ jobs:
       - name: Look for an exposed error log
         run: |
           set -uo pipefail
-          BASE="https://taxi.ecardo.ir"
+          BASE="https://opss.ir"
           echo "=== common PHP error log locations ==="
           for p in error_log php_error.log errors.log error.log debug.log logs/error.log runtime/logs/; do
             code=$(curl -sS -o /tmp/e -w "%{http_code}" --max-time 15 "$BASE/$p" 2>/dev/null || echo "err")
@@ -79,7 +79,7 @@ jobs:
       - name: Try to make PHP show the error
         run: |
           set -uo pipefail
-          BASE="https://taxi.ecardo.ir"
+          BASE="https://opss.ir"
           # display_errors is usually off, but an .htaccess that lets a query
           # parameter through, or an APP_DEBUG-style flag, can reveal it.
           echo "=== parameters that sometimes surface the message ==="
@@ -97,7 +97,7 @@ jobs:
             echo "### Backend diagnosis"
             echo ""
             echo "The app itself is fine: it launches and sends a well-formed POST to"
-            echo "\`https://taxi.ecardo.ir/webservice_shark.php?type=countryList\`."
+            echo "\`https://opss.ir/webservice_shark.php?type=countryList\`."
             echo ""
             echo "#### Results"
             echo '```'

@@ -295,7 +295,27 @@ public class LauncherActivity extends BaseActivity implements ProviderInstaller.
         closeLoader();
 
         generalFunc.storeData("TSITE_DB", generalFunc.getJsonValue("TSITE_DB", responseString));
-        generalFunc.storeData("GOOGLE_API_REPLACEMENT_URL", generalFunc.getJsonValue("GOOGLE_API_REPLACEMENT_URL", responseString));
+        // OPSS_PSS_FIX 2026-10-19: sanitize GOOGLE_API_REPLACEMENT_URL. Backend currently
+        // returns "http://127.0.0.1:9330/" which is unreachable from an Android device and
+        // breaks all maps/directions/autocomplete calls. Treat loopback as "no proxy" so
+        // the client falls back to the built-in Google Maps API key.
+        String mapProxyUrl = generalFunc.getJsonValue("GOOGLE_API_REPLACEMENT_URL", responseString);
+        if (mapProxyUrl != null && (mapProxyUrl.contains("127.0.0.1") || mapProxyUrl.contains("localhost"))) {
+            mapProxyUrl = "";
+        }
+        generalFunc.storeData("GOOGLE_API_REPLACEMENT_URL", mapProxyUrl);
+        // OPSS_PSS_FIX 2026-10-19: rewrite SocketCluster URL. Config ships as
+        // "http://opss.ir:5251/socketcluster/" which is cleartext on port 5251; Cloudflare
+        // only proxies 80/443. Upgrade to wss://opss.ir/socketcluster/ over TLS on 443 so
+        // the realtime channel can be established from mobile networks. If handshake fails
+        // the socket library's retry loop falls back to polling.
+        String scUrl = generalFunc.getJsonValue("SC_CONNECT_URL", responseString);
+        if (scUrl != null && scUrl.length() > 0) {
+            scUrl = scUrl.replace("http://opss.ir:5251/socketcluster/", "wss://opss.ir/socketcluster/");
+            scUrl = scUrl.replace("ws://opss.ir:5251/socketcluster/",   "wss://opss.ir/socketcluster/");
+            generalFunc.storeData(Utils.SC_CONNECT_URL_KEY, scUrl);
+        }
+
         generalFunc.storeData("APP_LAUNCH_IMAGES", generalFunc.getJsonValue("APP_LAUNCH_IMAGES", responseString));
         new SetGeneralData(generalFunc, responseObj);
 

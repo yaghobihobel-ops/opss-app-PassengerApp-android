@@ -98,7 +98,7 @@ jobs:
           python3 - <<'PY'
           import pathlib
 
-          BASE = "https://taxi.ecardo.ir/"
+          BASE = "https://opss.ir/"
 
           p = pathlib.Path("app/build.gradle")
           s = p.read_text(encoding="utf-8")
